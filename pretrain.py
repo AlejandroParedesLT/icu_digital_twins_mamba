@@ -17,7 +17,8 @@ from odyssey.data.dataset import PretrainDataset, PretrainDatasetDecoder
 from odyssey.data.tokenizer import ConceptTokenizer
 from odyssey.models.cehr_bert.model import BertPretrain
 from odyssey.models.cehr_big_bird.model import BigBirdPretrain
-from odyssey.models.ehr_mamba.model import MambaPretrain
+# from odyssey.models.ehr_mamba.model import MambaPretrain
+from odyssey.models.ehr_mamba.multi_modal_model import MambaPretrain
 from odyssey.models.ehr_mamba2.model import Mamba2Pretrain
 from odyssey.models.model_utils import (
     get_run_id,

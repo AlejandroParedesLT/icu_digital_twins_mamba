@@ -55,7 +55,9 @@ To use either of these, you need to install additional optional dependencies:
 2. `pip install -e .[slurm_parallelism]` for submitit cluster parallelism support.
 
 
-### Running the Extract Pipeline
+### Running the Extract Pipeline A diagram of a state model
+
+AI-generated content may be incorrect.
 
 The `run_extract.sh` script performs the following steps:
 

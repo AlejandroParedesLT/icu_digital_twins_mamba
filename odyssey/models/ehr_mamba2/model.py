@@ -7,6 +7,8 @@ from torch.cuda.amp import autocast
 from torch.optim import AdamW
 from torch.optim.lr_scheduler import CosineAnnealingLR, LinearLR, SequentialLR
 from transformers import Mamba2Config, Mamba2ForCausalLM
+# from transformers import MambaForCausalLM, MambaConfig
+# from mamba_ssm.models.config_mamba import MambaConfig
 
 
 class Mamba2Pretrain(pl.LightningModule):
@@ -53,6 +55,7 @@ class Mamba2Pretrain(pl.LightningModule):
         self.chunk_size = chunk_size
 
         self.config = Mamba2Config(
+        # self.config = MambaConfig(
             vocab_size=self.vocab_size,
             hidden_size=self.embedding_size,
             state_size=self.state_size,
@@ -72,6 +75,7 @@ class Mamba2Pretrain(pl.LightningModule):
 
         # Mamba has its own initialization
         self.model = Mamba2ForCausalLM(config=self.config)
+        # self.model = MambaForCausalLM(config=self.config)
 
     def _step(self, batch: Dict[str, Any], batch_idx: int, stage: str) -> Any:
         """Run a single step for training or validation.

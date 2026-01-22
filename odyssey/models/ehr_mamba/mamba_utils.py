@@ -8,8 +8,8 @@ from torch import nn
 from torch.nn import BCEWithLogitsLoss, CrossEntropyLoss, MSELoss
 from transformers.activations import ACT2FN
 from transformers.models.mamba.modeling_mamba import (
-    MAMBA_INPUTS_DOCSTRING,
-    MAMBA_START_DOCSTRING,
+    # MAMBA_INPUTS_DOCSTRING,
+    # MAMBA_START_DOCSTRING,
     MambaModel,
     MambaPreTrainedModel,
 )
@@ -74,13 +74,13 @@ class MambaClassificationHead(nn.Module):
         return self.out_proj(x)
 
 
-@add_start_docstrings(
-    """
-    Mamba Model with a sequence classification/regression head on top
-    (a linear layer on top of the pooled output) e.g. for GLUE tasks.
-    """,
-    MAMBA_START_DOCSTRING,
-)
+# @add_start_docstrings(
+#     """
+#     Mamba Model with a sequence classification/regression head on top
+#     (a linear layer on top of the pooled output) e.g. for GLUE tasks.
+#     """,
+#     MAMBA_START_DOCSTRING,
+# )
 class MambaForSequenceClassification(MambaPreTrainedModel):
     def __init__(self, config):
         super().__init__(config)
@@ -92,9 +92,9 @@ class MambaForSequenceClassification(MambaPreTrainedModel):
         # Initialize weights and apply final processing
         self.post_init()
 
-    @add_start_docstrings_to_model_forward(
-        MAMBA_INPUTS_DOCSTRING.format("batch_size, sequence_length")
-    )
+    # @add_start_docstrings_to_model_forward(
+    #     MAMBA_INPUTS_DOCSTRING.format("batch_size, sequence_length")
+    # )
     @replace_return_docstrings(
         output_type=MambaSequenceClassifierOutput, config_class=_CONFIG_FOR_DOC
     )
