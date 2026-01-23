@@ -33,11 +33,6 @@ class ICUMultimodalMambda(nn.Module):
         num_hidden_layers: int = 32,
         expand: int = 2,
         conv_kernel: int = 4,
-        learning_rate: float = 5e-5,
-        dropout_prob: float = 0.1,
-        padding_idx: int = 0,
-        cls_idx: int = 5,
-        use_mambapy: bool = False,
         # Image-specific parameters
         image_size: int = 224,
         patch_size: int = 16,
@@ -124,3 +119,134 @@ class ICUMultimodalMambda(nn.Module):
 
         # Mamba has its own initialization
         self.model = MambaForCausalLM(config=self.config)
+    
+    def _setup_image_encoder(
+        self, 
+        image_size, 
+        patch_size, 
+        dim, 
+        depth, 
+        heads
+    ):
+        """Set up the Vision Transformer encoder for images."""
+        from zeta.structs import Encoder, ViTransformerWrapper
+        
+        self.image_encoder = ViTransformerWrapper(
+            image_size=image_size,
+            patch_size=patch_size,
+            attn_layers=Encoder(
+                dim=dim,
+                depth=depth,
+                heads=heads,
+            ),
+        )
+        
+    def encode_image(self, images: torch.Tensor) -> torch.Tensor:
+        """
+        Encode images to embeddings.
+        
+        Args:
+            images: Tensor of shape (batch_size, channels, height, width)
+            
+        Returns:
+            Image embeddings of shape (batch_size, seq_len, embedding_size)
+        """
+        if not self.use_images:
+            raise ValueError("Image encoding is not enabled. Set use_images=True")
+        
+        # Encode image through ViT
+        image_embeds = self.image_encoder(images, return_embeddings=True)
+        
+        # Project to match text embedding dimension
+        image_embeds = self.image_projection(image_embeds)
+        
+        return image_embeds
+
+    def fuse_embeddings(
+        self, 
+        ehr_embeds: torch.Tensor, 
+        image_embeds: torch.Tensor
+    ) -> torch.Tensor:
+        """
+        Fuse text and image embeddings.
+        
+        Args:
+            text_embeds: Text embeddings (batch_size, text_seq_len, dim)
+            image_embeds: Image embeddings (batch_size, image_seq_len, dim)
+            
+        Returns:
+            Fused embeddings
+        """
+        if self.fusion_method == "add":
+            # Average pool image embeddings to match text length if needed
+            if image_embeds.shape[1] != ehr_embeds.shape[1]:
+                image_embeds = torch.nn.functional.adaptive_avg_pool1d(
+                    image_embeds.transpose(1, 2), 
+                    ehr_embeds.shape[1]
+                ).transpose(1, 2)
+            fused = text_embeds + image_embeds
+            
+        elif self.fusion_method == "concat":
+            # Concatenate along sequence dimension
+            fused = torch.cat([text_embeds, image_embeds], dim=1)
+            
+        elif self.fusion_method == "mlp":
+            # Use MLP to fuse
+            if image_embeds.shape[1] != ehr_embeds.shape[1]:
+                image_embeds = torch.nn.functional.adaptive_avg_pool1d(
+                    image_embeds.transpose(1, 2), 
+                    ehr_embeds.shape[1]
+                ).transpose(1, 2)
+            combined = text_embeds + image_embeds
+            fused = self.fusion_mlp(combined) + text_embeds  # Residual connection
+        else:
+            raise ValueError(f"Unknown fusion method: {self.fusion_method}")
+        
+        # Apply layer norm
+        fused = self.fusion_norm(fused)
+        
+        return fused
+
+    def forward(
+        self,
+        inputs: Tuple[
+            torch.Tensor,
+            torch.Tensor,
+            torch.Tensor,
+            torch.Tensor,
+            torch.Tensor,
+            torch.Tensor,
+        ],
+        
+        labels: Optional[torch.Tensor] = None,
+        output_hidden_states: Optional[bool] = False,
+        return_dict: Optional[bool] = True,
+        text:torch.Tensor=None,
+        images:torch.Tensor=None,
+    ) -> Union[Tuple[torch.Tensor, ...], MambaCausalLMOutput]:
+        """Forward pass for the model."""
+        concept_ids, type_ids, time_stamps, ages, visit_orders, visit_segments = inputs
+        inputs = self.embeddings(
+            input_ids=concept_ids,
+            token_type_ids_batch=type_ids,
+            time_stamps=time_stamps,
+            ages=ages,
+            visit_orders=visit_orders,
+            visit_segments=visit_segments,
+        )
+        
+
+        if self.use_images:
+            inputs=self.fuse_embeddings(inputs,images)
+        
+
+        if labels is None:
+            labels = concept_ids
+
+        
+        return self.model(
+            inputs_embeds=inputs,
+            labels=labels,
+            output_hidden_states=output_hidden_states,
+            return_dict=return_dict,
+        )
