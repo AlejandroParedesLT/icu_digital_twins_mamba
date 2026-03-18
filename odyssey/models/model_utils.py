@@ -38,43 +38,67 @@ def load_config(config_dir: str, model_type: str) -> Any:
         return yaml.safe_load(file)
 
 
+import numpy as np
+# import pandas as pd
+
+def fix_missing_columns(data: pd.DataFrame, max_len: int = 2048) -> pd.DataFrame:
+    """Add missing token columns."""
+    data = data.copy()
+    
+    # Rename columns to remove _2048 suffix (except event_tokens)
+    data = data.rename(columns={
+        'position_tokens_2048': 'position_tokens',
+        'elapsed_tokens_2048': 'elapsed_tokens',  
+        'visit_tokens_2048': 'visit_tokens',
+    })
+    
+    # Add type_tokens - extract from event tokens
+    def extract_type_tokens(event_tokens):
+        types = []
+        for token in event_tokens:
+            if isinstance(token, str):
+                types.append(0)  # Default type
+            else:
+                types.append(0)
+        return np.array(types, dtype=int)
+    
+    data['type_tokens'] = data['event_tokens_2048'].apply(extract_type_tokens)
+    
+    # Add age_tokens - use 25 as default
+    data['age_tokens'] = data['event_tokens_2048'].apply(
+        lambda x: np.full(min(len(x), max_len), 25, dtype=int)
+    )
+    
+    # Add time_tokens - use elapsed_tokens
+    data['time_tokens'] = data['elapsed_tokens']
+    
+    return data
+
+
 def load_pretrain_data(
     data_dir: str,
     sequence_file: str,
     id_file: str,
 ) -> pd.DataFrame:
-    """Load the pretraining data.
-
-    Parameters
-    ----------
-    data_dir: str
-        Directory containing the data files
-    sequence_file: str
-        Sequence file name
-    id_file: str
-        ID file name
-
-    Returns
-    -------
-    pd.DataFrame
-        Pretraining data
-
-    """
+    """Load the pretraining data."""
     sequence_path = join(data_dir, sequence_file)
     id_path = join(data_dir, id_file)
-
+    
     if not os.path.exists(sequence_path):
         raise FileNotFoundError(f"Sequence file not found: {sequence_path}")
-
     if not os.path.exists(id_path):
         raise FileNotFoundError(f"ID file not found: {id_path}")
-
-    # Loading with pandas directly might fail
+    
+    # Load data
     data = pl.read_parquet(sequence_path).to_pandas()
+    
     with open(id_path, "rb") as file:
         patient_ids = pickle.load(file)
-
-    return data.loc[data["patient_id"].isin(patient_ids["pretrain"])]
+    data=data.loc[data["subject_id"].isin(patient_ids["pretrain"])]
+    data = fix_missing_columns(data, max_len=2048)
+    print(data.columns)
+    # Filter for pretrain patients
+    return data
 
 
 def load_finetune_data(

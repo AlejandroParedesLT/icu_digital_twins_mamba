@@ -28,6 +28,7 @@ from odyssey.models.ehr_mamba.mamba_utils import (
     MambaSequenceClassifierOutput,
 )
 from odyssey.models.embeddings import MambaEmbeddingsForCEHR
+from odyssey.models.ehr_mamba.multimodal_mamba import ICUMultimodalMambda
 # from odyssey.models.
 
 class MambaPretrain(pl.LightningModule):
@@ -51,6 +52,7 @@ class MambaPretrain(pl.LightningModule):
         padding_idx: int = 0,
         cls_idx: int = 5,
         use_mambapy: bool = False,
+        use_images:bool=True,
         # Image-specific parameters
         image_size: int = 224,
         patch_size: int = 16,
@@ -85,58 +87,33 @@ class MambaPretrain(pl.LightningModule):
         self.image_encoder_dim = image_encoder_dim
         self.fusion_method = fusion_method
 
-
-        self.config = MambaConfig(
-            vocab_size=self.vocab_size,
-            hidden_size=self.embedding_size,
-            state_size=self.state_size,
-            num_hidden_layers=self.num_hidden_layers,
-            expand=self.expand,
-            conv_kernel=self.conv_kernel,
-            pad_token_id=self.padding_idx,
-            bos_token_id=self.cls_idx,
-            eos_token_id=self.padding_idx,
-            use_mambapy=self.use_mambapy,
-        )
-        self.embeddings = MambaEmbeddingsForCEHR(
-            config=self.config,
-            type_vocab_size=self.type_vocab_size,
-            max_num_visits=self.max_num_visits,
-            time_embeddings_size=self.time_embeddings_size,
-            visit_order_size=self.visit_order_size,
-            hidden_dropout_prob=self.dropout_prob,
-        )
-        
-        # Image components (only initialized if use_images=True)
-        if self.use_images:
-            self._setup_image_encoder(
-                image_size, 
-                patch_size, 
-                image_encoder_dim,
-                image_encoder_depth,
-                image_encoder_heads
-            )
-            # Project image embeddings to match text embedding dimension
-            self.image_projection = nn.Linear(image_encoder_dim, embedding_size)
-            
-            # Fusion layer (if using MLP fusion)
-            if fusion_method == "mlp":
-                self.fusion_mlp = nn.Sequential(
-                    nn.Linear(embedding_size, embedding_size * 4),
-                    nn.GELU(),
-                    nn.Dropout(dropout_prob),
-                    nn.Linear(embedding_size * 4, embedding_size),
-                )
-            
-            # Layer norm after fusion
-            self.fusion_norm = nn.LayerNorm(embedding_size)
-                
-        
-        # Initialize weights and apply final processing
-        self.post_init()
-
         # Mamba has its own initialization
-        self.model = MambaForCausalLM(config=self.config)
+        self.model = ICUMultimodalMambda(
+            vocab_size,
+            embedding_size,
+            time_embeddings_size,
+            visit_order_size,
+            type_vocab_size,
+            max_num_visits,
+            max_seq_length,
+            state_size,
+            num_hidden_layers,
+            expand,
+            conv_kernel,
+            use_images,
+            dropout_prob,
+            padding_idx,
+            cls_idx,
+            use_mambapy,
+            # Image-specific parameters
+            image_size,
+            patch_size,
+            image_encoder_dim,
+            image_encoder_depth,
+            image_encoder_heads,
+            fusion_method
+        )
+        # self.model = MambaForCausalLM(config=self.config)
 
     def _init_weights(self, module: torch.nn.Module) -> None:
         """Initialize the weights."""
@@ -156,6 +133,21 @@ class MambaPretrain(pl.LightningModule):
         """Apply weight initialization."""
         self.apply(self._init_weights)
 
+    def forward(
+        self,
+        inputs,
+        labels: Optional[torch.Tensor] = None,
+        output_hidden_states: Optional[bool] = False,
+        return_dict: Optional[bool] = True,
+    ) -> Union[Tuple[torch.Tensor, ...], MambaCausalLMOutput]:
+        """Forward pass for the model."""
+        return self.model(
+            inputs=inputs,
+            labels=labels,
+            output_hidden_states=output_hidden_states,
+            return_dict=return_dict,
+        )
+
     def training_step(self, batch: Dict[str, Any], batch_idx: int) -> Any:
         """Train model on training dataset."""
         inputs = (
@@ -165,6 +157,7 @@ class MambaPretrain(pl.LightningModule):
             batch["ages"],
             batch["visit_orders"],
             batch["visit_segments"],
+            batch.get("image",None) or None
         )
         labels = batch["labels"]
 
@@ -180,6 +173,7 @@ class MambaPretrain(pl.LightningModule):
         self.log_dict(
             dictionary={"train_loss": loss, "lr": current_lr},
             on_step=True,
+            on_epoch=True,
             prog_bar=True,
             sync_dist=True,
         )
@@ -194,6 +188,7 @@ class MambaPretrain(pl.LightningModule):
             batch["ages"],
             batch["visit_orders"],
             batch["visit_segments"],
+            batch.get("image",None) or None
         )
         labels = batch["labels"]
 
@@ -209,6 +204,7 @@ class MambaPretrain(pl.LightningModule):
         self.log_dict(
             dictionary={"val_loss": loss, "lr": current_lr},
             on_step=True,
+            on_epoch=True,
             prog_bar=True,
             sync_dist=True,
         )

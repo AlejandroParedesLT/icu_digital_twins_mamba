@@ -13,13 +13,13 @@ from pytorch_lightning.strategies.ddp import DDPStrategy
 from sklearn.model_selection import train_test_split
 from torch.utils.data import DataLoader
 
-from odyssey.data.dataset import PretrainDataset, PretrainDatasetDecoder
+from odyssey.data.dataset import PretrainDataset, PretrainDatasetDecoder, PretrainWithImages
 from odyssey.data.tokenizer import ConceptTokenizer
 from odyssey.models.cehr_bert.model import BertPretrain
 from odyssey.models.cehr_big_bird.model import BigBirdPretrain
 # from odyssey.models.ehr_mamba.model import MambaPretrain
-from odyssey.models.ehr_mamba.multi_modal_model import MambaPretrain
-from odyssey.models.ehr_mamba2.model import Mamba2Pretrain
+from odyssey.models.ehr_mamba.train_multi_modal_model import MambaPretrain
+# from odyssey.models.ehr_mamba2.model import Mamba2Pretrain
 from odyssey.models.model_utils import (
     get_run_id,
     load_config,
@@ -69,21 +69,37 @@ def main(args: argparse.Namespace, model_config: Dict[str, Any]) -> None:
     tokenizer.fit_on_vocab()
 
     # Load datasets
-    if args.is_decoder:  # e.g. Mamba and Mamba2
+    if args.is_decoder:
         train_dataset = PretrainDatasetDecoder(
             data=pre_train,
             tokenizer=tokenizer,
             max_len=args.max_len,
             padding_side=args.padding_side,
-            return_attention_mask=args.return_attention_mask,
+            return_attention_mask=args.return_attention_mask
         )
         val_dataset = PretrainDatasetDecoder(
             data=pre_val,
             tokenizer=tokenizer,
             max_len=args.max_len,
             padding_side=args.padding_side,
-            return_attention_mask=args.return_attention_mask,
+            return_attention_mask=args.return_attention_mask
         )
+        # train_dataset=PretrainWithImages(
+        #     data=pre_train,
+        #     tokenizer=tokenizer,
+        #     max_len=args.max_len,
+        #     padding_side=args.padding_side,
+        #     return_attention_mask=args.return_attention_mask,
+        #     use_images=False
+        # )
+        # val_dataset = PretrainWithImages(
+        #     data=pre_val,
+        #     tokenizer=tokenizer,
+        #     max_len=args.max_len,
+        #     padding_side=args.padding_side,
+        #     return_attention_mask=args.return_attention_mask,
+        #     use_images=False
+        # )
 
     else:
         train_dataset = PretrainDataset(
@@ -149,16 +165,17 @@ def main(args: argparse.Namespace, model_config: Dict[str, Any]) -> None:
             vocab_size=tokenizer.get_vocab_size(),
             padding_idx=tokenizer.get_pad_token_id(),
             cls_idx=tokenizer.get_class_token_id(),
+            use_images=False,
             **model_config,
         )
-    elif args.model_type == "ehr_mamba2":
-        model = Mamba2Pretrain(
-            vocab_size=tokenizer.get_vocab_size(),
-            padding_idx=tokenizer.get_pad_token_id(),
-            cls_idx=tokenizer.get_class_token_id(),
-            eos_idx=tokenizer.get_eos_token_id(),
-            **model_config,
-        )
+    # elif args.model_type == "ehr_mamba2":
+    #     model = Mamba2Pretrain(
+    #         vocab_size=tokenizer.get_vocab_size(),
+    #         padding_idx=tokenizer.get_pad_token_id(),
+    #         cls_idx=tokenizer.get_class_token_id(),
+    #         eos_idx=tokenizer.get_eos_token_id(),
+    #         **model_config,
+    #     )
 
     run_id = get_run_id(args.checkpoint_dir)
 
@@ -203,7 +220,7 @@ def main(args: argparse.Namespace, model_config: Dict[str, Any]) -> None:
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-
+    print('Reading configuration')
     # project configuration
     parser.add_argument(
         "--model_type",
@@ -270,7 +287,7 @@ if __name__ == "__main__":
     parser.add_argument(
         "--tokenizer_type",
         type=str,
-        required=True,
+        required=False,
         default="v1",
         help="Tokenizer version",
     )
@@ -322,7 +339,7 @@ if __name__ == "__main__":
     )
 
     args = parser.parse_args()
-
+    print(args)
     if args.model_type not in ["cehr_bert", "cehr_bigbird", "ehr_mamba", "ehr_mamba2"]:
         print(
             "Invalid model type. Choose 'cehr_bert' or 'cehr_bigbird' or 'ehr_mamba' or 'ehr_mamba2'."

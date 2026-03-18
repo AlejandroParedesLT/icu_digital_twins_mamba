@@ -367,30 +367,30 @@ def main():
     args = parser.parse_args()
     
     # Create output directory
-    os.makedirs(args.output_dir, exist_ok=True)
+    # os.makedirs(args.output_dir, exist_ok=True)
     
-    # Step 1: Load MEDS data
-    df = load_meds_data(args.meds_prep_dir)
-    print('LOaded meds data')
-    # Step 2: Extract sequences
-    sequences_df = extract_sequences_from_meds(df, max_len=args.max_len)
-    print('Vocabularies')
-    # Step 3: Create vocabularies
-    vocab_dir = os.path.join(args.output_dir, "vocab")
-    create_vocabularies(sequences_df, args.output_dir, max_len=args.max_len)
+    # # Step 1: Load MEDS data
+    # df = load_meds_data(args.meds_prep_dir)
+    # print('LOaded meds data')
+    # # Step 2: Extract sequences
+    # sequences_df = extract_sequences_from_meds(df, max_len=args.max_len)
+    # print('Vocabularies')
+    # # Step 3: Create vocabularies
+    # vocab_dir = os.path.join(args.output_dir, "vocab")
+    # create_vocabularies(sequences_df, args.output_dir, max_len=args.max_len)
     
-    # Step 4: Initialize tokenizer
-    print("Initializing tokenizer...")
-    tokenizer = ConceptTokenizer(data_dir=vocab_dir)
-    tokenizer.fit_on_vocab(with_tasks=True)
+    # # Step 4: Initialize tokenizer
+    # print("Initializing tokenizer...")
+    # tokenizer = ConceptTokenizer(data_dir=vocab_dir)
+    # tokenizer.fit_on_vocab(with_tasks=True)
     
-    # Save tokenizer
-    tokenizer_dir = os.path.join(args.output_dir, "tokenizer")
-    tokenizer.save(tokenizer_dir)
-    print(f"Saved tokenizer to {tokenizer_dir}")
+    # # Save tokenizer
+    # tokenizer_dir = os.path.join(args.output_dir, "tokenizer")
+    # tokenizer.save(tokenizer_dir)
+    # print(f"Saved tokenizer to {tokenizer_dir}")
     
-    # Step 5: Add task labels (if applicable)
-    sequences_df = add_task_labels(sequences_df, max_len=args.max_len)
+    # # Step 5: Add task labels (if applicable)
+    # sequences_df = add_task_labels(sequences_df, max_len=args.max_len)
     
     # Step 6: Save patient sequences as parquet
     sequence_dir = os.path.join(args.output_dir, "patient_sequences")

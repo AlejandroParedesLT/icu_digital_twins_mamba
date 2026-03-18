@@ -19,11 +19,11 @@ model_finetune:
   multi_head: False
 
 train:
-  batch_size: 1 #44
-  num_workers: 3 #5
-  gpus: 1 #4
+  batch_size: 2 
+  num_workers: 5 #5
+  gpus: 1
   nodes: 1
-  max_epochs: 2 #15
+  max_epochs: 3
   acc: 1
   persistent_workers: True
   pin_memory: False

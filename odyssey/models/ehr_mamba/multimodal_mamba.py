@@ -33,6 +33,11 @@ class ICUMultimodalMambda(nn.Module):
         num_hidden_layers: int = 32,
         expand: int = 2,
         conv_kernel: int = 4,
+        use_images=True,
+        dropout_prob=0.1,
+        padding_idx=257,
+        cls_idx=5,
+        use_mambapy=False,
         # Image-specific parameters
         image_size: int = 224,
         patch_size: int = 16,
@@ -54,13 +59,11 @@ class ICUMultimodalMambda(nn.Module):
         self.num_hidden_layers = num_hidden_layers
         self.expand = expand
         self.conv_kernel = conv_kernel
-        self.learning_rate = learning_rate
         self.dropout_prob = dropout_prob
-        self.padding_idx = padding_idx
-        self.cls_idx = cls_idx
-        self.use_mambapy = use_mambapy
-        
-         # Image-specific attributes
+        self.padding_idx=padding_idx
+        self.cls_idx=cls_idx
+
+        # Image-specific attributes
         self.use_images = use_images
         self.image_size = image_size
         self.patch_size = patch_size
@@ -78,7 +81,7 @@ class ICUMultimodalMambda(nn.Module):
             pad_token_id=self.padding_idx,
             bos_token_id=self.cls_idx,
             eos_token_id=self.padding_idx,
-            use_mambapy=self.use_mambapy,
+            use_mambapy=use_mambapy,
         )
         self.embeddings = MambaEmbeddingsForCEHR(
             config=self.config,
@@ -120,6 +123,24 @@ class ICUMultimodalMambda(nn.Module):
         # Mamba has its own initialization
         self.model = MambaForCausalLM(config=self.config)
     
+    def post_init(self) -> None:
+        """Apply weight initialization."""
+        self.apply(self._init_weights)
+
+    def _init_weights(self, module: torch.nn.Module) -> None:
+        """Initialize the weights."""
+        if isinstance(module, nn.Linear):
+            module.weight.data.normal_(mean=0.0, std=self.config.initializer_range)
+            if module.bias is not None:
+                module.bias.data.zero_()
+        elif isinstance(module, nn.Embedding):
+            module.weight.data.normal_(mean=0.0, std=self.config.initializer_range)
+            if module.padding_idx is not None:
+                module.weight.data[module.padding_idx].zero_()
+        elif isinstance(module, nn.LayerNorm):
+            module.bias.data.zero_()
+            module.weight.data.fill_(1.0)
+
     def _setup_image_encoder(
         self, 
         image_size, 
@@ -171,7 +192,7 @@ class ICUMultimodalMambda(nn.Module):
         Fuse text and image embeddings.
         
         Args:
-            text_embeds: Text embeddings (batch_size, text_seq_len, dim)
+            ehr_embeds: Text embeddings (batch_size, text_seq_len, dim)
             image_embeds: Image embeddings (batch_size, image_seq_len, dim)
             
         Returns:
@@ -184,11 +205,11 @@ class ICUMultimodalMambda(nn.Module):
                     image_embeds.transpose(1, 2), 
                     ehr_embeds.shape[1]
                 ).transpose(1, 2)
-            fused = text_embeds + image_embeds
+            fused = ehr_embeds + image_embeds
             
         elif self.fusion_method == "concat":
             # Concatenate along sequence dimension
-            fused = torch.cat([text_embeds, image_embeds], dim=1)
+            fused = torch.cat([ehr_embeds, image_embeds], dim=1)
             
         elif self.fusion_method == "mlp":
             # Use MLP to fuse
@@ -197,8 +218,8 @@ class ICUMultimodalMambda(nn.Module):
                     image_embeds.transpose(1, 2), 
                     ehr_embeds.shape[1]
                 ).transpose(1, 2)
-            combined = text_embeds + image_embeds
-            fused = self.fusion_mlp(combined) + text_embeds  # Residual connection
+            combined = ehr_embeds + image_embeds
+            fused = self.fusion_mlp(combined) + ehr_embeds  # Residual connection
         else:
             raise ValueError(f"Unknown fusion method: {self.fusion_method}")
         
@@ -209,23 +230,13 @@ class ICUMultimodalMambda(nn.Module):
 
     def forward(
         self,
-        inputs: Tuple[
-            torch.Tensor,
-            torch.Tensor,
-            torch.Tensor,
-            torch.Tensor,
-            torch.Tensor,
-            torch.Tensor,
-        ],
-        
+        inputs,
         labels: Optional[torch.Tensor] = None,
         output_hidden_states: Optional[bool] = False,
         return_dict: Optional[bool] = True,
-        text:torch.Tensor=None,
-        images:torch.Tensor=None,
     ) -> Union[Tuple[torch.Tensor, ...], MambaCausalLMOutput]:
         """Forward pass for the model."""
-        concept_ids, type_ids, time_stamps, ages, visit_orders, visit_segments = inputs
+        concept_ids, type_ids, time_stamps, ages, visit_orders, visit_segments, images = inputs
         inputs = self.embeddings(
             input_ids=concept_ids,
             token_type_ids_batch=type_ids,

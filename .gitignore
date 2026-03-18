@@ -161,4 +161,7 @@ cython_debug/
 
 .python-version
 
-pretrain.sh
+data/*
+checkpoints/*
+logs/*
+.vscode

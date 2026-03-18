@@ -92,11 +92,11 @@ class BaseDataset(Dataset, ABC):
 
         # Determine cutoff length
         if cutoff is None:
-            cutoff = min(self.max_len, len(row["event_tokens"]))
+            cutoff = min(self.max_len, len(row["event_tokens_2048"]))
         cutoff = min(cutoff, self.max_len)
 
         # Truncate and pad tokens
-        row["event_tokens"] = row["event_tokens"][:cutoff]
+        row["event_tokens_2048"] = row["event_tokens_2048"][:cutoff]
 
         if additional_columns:
             for col in additional_columns:
@@ -112,15 +112,15 @@ class BaseDataset(Dataset, ABC):
 
         # Join event tokens for tokenizer
         tokens = (
-            row["event_tokens"].tolist()
-            if isinstance(row["event_tokens"], np.ndarray)
-            else row["event_tokens"]
+            row["event_tokens_2048"].tolist()
+            if isinstance(row["event_tokens_2048"], np.ndarray)
+            else row["event_tokens_2048"]
         )
 
         if type(tokens) == str:
             tokens = [tokens]
 
-        row["event_tokens"] = " ".join(tokens)
+        row["event_tokens_2048"] = " ".join(tokens)
 
         return row
 
@@ -141,32 +141,99 @@ class BaseDataset(Dataset, ABC):
 class AugmentedTokenizationMixin:
     """Mixin class for adding additional token types to the dataset."""
 
-    def add_additional_tokens(
-        self, data: pd.Series, additional_token_types: List[str] = None
-    ) -> Dict[str, torch.Tensor]:
-        """Add specified additional token types to the dataset.
+    # def add_additional_tokens(
+    #     self, data: pd.Series, additional_token_types: List[str] = None
+    # ) -> Dict[str, torch.Tensor]:
+    #     """Add specified additional token types to the dataset.
 
+    #     Parameters
+    #     ----------
+    #     data : pd.Series
+    #         A series containing token sequences and additional information.
+    #     additional_token_types : List[str], optional
+    #         A list specifying which token types to add (e.g., ["type_ids", "ages"]).
+    #         If None, all available tokens will be added.
+
+    #     Returns
+    #     -------
+    #     Dict[str, torch.Tensor]
+    #         A dictionary containing tensors for each specified additional token type.
+    #     """
+    #     if additional_token_types is None:
+    #         return {}  # Return an empty dictionary if no token types are specified
+
+    #     return {
+    #         token_name: torch.tensor(data[column_name])
+    #         for token_name, column_name in AUGMENTED_TOKEN_MAP.items()
+    #         if token_name in additional_token_types
+    #     }
+    def add_additional_tokens(
+        self, 
+        data: pd.Series, 
+        additional_token_types: List[str] = None
+    ) -> Dict[str, torch.Tensor]:
+        """Add additional token types to the model input.
+        
         Parameters
         ----------
         data : pd.Series
-            A series containing token sequences and additional information.
+            Row of data containing token columns
         additional_token_types : List[str], optional
-            A list specifying which token types to add (e.g., ["type_ids", "ages"]).
-            If None, all available tokens will be added.
-
+            List of additional token type column names
+            
         Returns
         -------
         Dict[str, torch.Tensor]
-            A dictionary containing tensors for each specified additional token type.
+            Dictionary with standardized key names for model input
         """
-        if additional_token_types is None:
-            return {}  # Return an empty dictionary if no token types are specified
-
-        return {
-            token_name: torch.tensor(data[column_name])
-            for token_name, column_name in AUGMENTED_TOKEN_MAP.items()
-            if token_name in additional_token_types
+        tokens = {}
+        
+        # Map column names to expected model input keys
+        column_to_key_mapping = {
+            'type_tokens': 'type_ids',
+            'age_tokens': 'ages',
+            'time_tokens': 'time_stamps',
+            'position_tokens': 'visit_orders',
+            'visit_tokens': 'visit_segments',
         }
+        
+        # Process additional token types if specified
+        if additional_token_types:
+            for token_type in additional_token_types:
+                if token_type in data:
+                    # Get the standardized key name
+                    key_name = column_to_key_mapping.get(token_type, token_type)
+                    
+                    # Get the token values
+                    token_values = data[token_type]
+                    
+                    # Handle different data types
+                    if isinstance(token_values, (list, np.ndarray)):
+                        token_values = list(token_values)
+                    else:
+                        token_values = [token_values]
+                    
+                    # Convert to tensor
+                    if 'time' in token_type or 'elapsed' in token_type:
+                        tokens[key_name] = torch.tensor(token_values, dtype=torch.float32)
+                    else:
+                        tokens[key_name] = torch.tensor(token_values, dtype=torch.long)
+        
+        # Ensure all required keys exist (add defaults if missing)
+        required_keys = {
+            'type_ids': (torch.long, 0),
+            'ages': (torch.long, 25),
+            'time_stamps': (torch.float32, 0.0),
+            'visit_orders': (torch.long, 0),
+            'visit_segments': (torch.long, 0),
+        }
+        
+        for key, (dtype, default_val) in required_keys.items():
+            if key not in tokens:
+                # Create default tensor with max_len size
+                tokens[key] = torch.full((self.max_len,), default_val, dtype=dtype)
+        
+        return tokens
 
 
 class MaskingMixin:
@@ -381,7 +448,7 @@ class PretrainDataset(BaseDataset, AugmentedTokenizationMixin, MaskingMixin):
         )
 
         # Tokenize and mask the input data
-        tokenized_input = self.tokenize_data(data["event_tokens"])
+        tokenized_input = self.tokenize_data(data["event_tokens_2048"])
         concept_tokens = tokenized_input["input_ids"].squeeze()
         attention_mask = tokenized_input["attention_mask"].squeeze()
         masked_tokens, labels = self.mask_tokens(concept_tokens)
@@ -465,7 +532,7 @@ class PretrainDatasetDecoder(BaseDataset, AugmentedTokenizationMixin):
         data = self.truncate_and_pad(
             row=data, cutoff=cutoff, additional_columns=self.additional_token_types
         )
-        tokenized_input = self.tokenize_data(data["event_tokens"])
+        tokenized_input = self.tokenize_data(data["event_tokens_2048"])
 
         # Prepare model input
         tokens = self.add_additional_tokens(data, self.additional_token_types)
@@ -781,3 +848,86 @@ class FinetuneDatasetDecoder(
             tokens["attention_mask"] = tokenized_input["attention_mask"].squeeze()
 
         return tokens
+
+
+import torch
+from torch.utils.data import Dataset
+from PIL import Image
+import torchvision.transforms as transforms
+
+class PretrainWithImages(PretrainDataset):
+    """Extended dataset that includes chest X-ray images."""
+    
+    def __init__(
+        self,
+        data: pd.DataFrame,
+        tokenizer: ConceptTokenizer,
+        max_len: int = 2048,
+        additional_token_types: List[str] = None,
+        padding_side: str = "right",
+        return_attention_mask: bool = True,
+        return_labels: bool = True,
+        mimic_cxr_dir="/hpc/home/aparedeslatorre1/icu_digital_twins_mamba/data/physionet.org/files/mimic-cxr/2.1.0",
+        image_size=224,
+    ):
+        super().__init__(data, tokenizer, max_len,additional_token_types,padding_side,return_attention_mask,return_labels)
+        self.mimic_cxr_dir = mimic_cxr_dir
+        
+        # Image transforms
+        self.transform = transforms.Compose([
+            transforms.Resize((image_size, image_size)),
+            transforms.ToTensor(),
+            transforms.Normalize(mean=[0.485, 0.456, 0.406], 
+                               std=[0.229, 0.224, 0.225])
+        ])
+        
+        # Load MIMIC-CXR metadata to map patient_id to image paths
+        self.image_mapping = self._load_image_mapping()
+    
+    def _load_image_mapping(self):
+        """Map patient IDs to their image file paths."""
+        import pandas as pd
+        
+        # Load MIMIC-CXR metadata
+        metadata_path = f"{self.mimic_cxr_dir}/mimic-cxr-2.1.0-metadata.csv"
+        cxr_metadata = pd.read_csv(metadata_path)
+        
+        # Group by subject_id and get most recent study
+        image_map = {}
+        for subject_id, group in cxr_metadata.groupby('subject_id'):
+            # Get most recent study for this patient
+            latest_study = group.sort_values('StudyDate', ascending=False).iloc[0]
+            
+            # Construct image path
+            # MIMIC-CXR structure: files/p{XX}/p{XXXXXXX}/s{XXXXXXXX}/{dicom_id}.jpg
+            patient_dir = f"p{str(subject_id)[:2]}/p{subject_id}"
+            study_dir = f"s{latest_study['study_id']}"
+            image_path = f"{self.mimic_cxr_dir}/files/{patient_dir}/{study_dir}/{latest_study['dicom_id']}.jpg"
+            
+            image_map[subject_id] = image_path
+        
+        return image_map
+    
+    def __getitem__(self, idx):
+        # Get base EHR data
+        base_item = super().__getitem__(idx)
+        
+        # Get patient_id for this sample
+        patient_id = self.data.iloc[idx]['patient_id']
+        
+        # Load corresponding image
+        if patient_id in self.image_mapping:
+            try:
+                image = Image.open(self.image_mapping[patient_id]).convert('RGB')
+                image_tensor = self.transform(image)
+            except:
+                # If image loading fails, use blank image
+                image_tensor = torch.zeros(3, 224, 224)
+        else:
+            # No image available for this patient
+            image_tensor = torch.zeros(3, 224, 224)
+        
+        # Add image to the item dictionary
+        base_item['image'] = image_tensor
+        
+        return base_item
