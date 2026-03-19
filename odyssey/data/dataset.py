@@ -23,6 +23,7 @@ TASK_TO_INDEX = {
     "c0": 3,  # Condition 0
     "c1": 4,
     "c2": 5,
+    "sepsis": 6,
 }
 
 # Mapping of additional token types to column names in the dataset
@@ -606,7 +607,7 @@ class FinetuneDataset(BaseDataset, AugmentedTokenizationMixin):
         data = self.truncate_and_pad(
             row=data, cutoff=cutoff, additional_columns=self.additional_token_types
         )
-        tokenized_input = self.tokenize_data(data["event_tokens"])
+        tokenized_input = self.tokenize_data(data["event_tokens_2048"])
 
         # Prepare model input
         tokens = self.add_additional_tokens(data, self.additional_token_types)
@@ -708,11 +709,11 @@ class FinetuneMultiDataset(
         data = self.data.iloc[index]
 
         # Swap the first token with the task token.
-        data["event_tokens"][0] = self.tokenizer.task_to_token(task)
+        data["event_tokens_2048"][0] = self.tokenizer.task_to_token(task)
         data = self.truncate_and_pad(
             row=data, cutoff=cutoff, additional_columns=self.additional_token_types
         )
-        tokenized_input = self.tokenize_data(data["event_tokens"])
+        tokenized_input = self.tokenize_data(data["event_tokens_2048"])
 
         # Prepare model input
         tokens = self.add_additional_tokens(data, self.additional_token_types)
@@ -794,6 +795,7 @@ class FinetuneDatasetDecoder(
         additional_token_types: List[str] = None,
         padding_side: str = "right",
         return_attention_mask: bool = True,
+        task_to_index_map: Optional[Dict[str, int]] = None,
     ):
         BaseDataset.__init__(self, data, tokenizer, max_len, padding_side)
         MultiTaskMixin.__init__(self, tasks)
@@ -802,6 +804,9 @@ class FinetuneDatasetDecoder(
         self.balance_guide = balance_guide
         self.additional_token_types = additional_token_types
         self.return_attention_mask = return_attention_mask
+        self.task_to_index_map = task_to_index_map or {
+            task: TASK_TO_INDEX.get(task, index) for index, task in enumerate(tasks)
+        }
         self.prepare_multi_task_data()
         self.balance_labels(balance_guide)
 
@@ -827,22 +832,22 @@ class FinetuneDatasetDecoder(
 
         # Swap the first and last token with the task token.
         if self.is_single_head:
-            data["event_tokens"][0] = self.tokenizer.task_to_token(task)
-            data["event_tokens"][-1] = self.tokenizer.task_to_token(task)
+            data["event_tokens_2048"][0] = self.tokenizer.task_to_token(task)
+            data["event_tokens_2048"][-1] = self.tokenizer.task_to_token(task)
         else:
-            data["event_tokens"][-1] = data["event_tokens"][0]
+            data["event_tokens_2048"][-1] = data["event_tokens_2048"][0]
 
         data = self.truncate_and_pad(
             row=data, cutoff=cutoff, additional_columns=self.additional_token_types
         )
-        tokenized_input = self.tokenize_data(data["event_tokens"])
+        tokenized_input = self.tokenize_data(data["event_tokens_2048"])
 
         # Prepare model input
         tokens = self.add_additional_tokens(data, self.additional_token_types)
         tokens["concept_ids"] = tokenized_input["input_ids"].squeeze()
         tokens["labels"] = torch.tensor(label)
         tokens["task"] = task
-        tokens["task_indices"] = torch.tensor(TASK_TO_INDEX[task])
+        tokens["task_indices"] = torch.tensor(self.task_to_index_map[task])
 
         if self.return_attention_mask:
             tokens["attention_mask"] = tokenized_input["attention_mask"].squeeze()

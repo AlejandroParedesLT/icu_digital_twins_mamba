@@ -35,6 +35,14 @@ from odyssey.models.model_utils import (
 )
 from odyssey.utils.utils import seed_everything
 
+ADDITIONAL_TOKEN_TYPES = [
+    "type_tokens",
+    "age_tokens",
+    "time_tokens",
+    "position_tokens",
+    "visit_tokens",
+]
+
 
 def main(  # noqa: PLR0912, PLR0915
     args: argparse.Namespace,
@@ -92,7 +100,7 @@ def main(  # noqa: PLR0912, PLR0915
 
     # Train Tokenizer
     tokenizer = ConceptTokenizer(data_dir=args.vocab_dir)
-    tokenizer.fit_on_vocab(with_tasks=args.is_multi_model)
+    tokenizer.fit_on_vocab(with_tasks=bool(args.tasks))
 
     # Load datasets based on model type
     if args.is_decoder:
@@ -102,6 +110,9 @@ def main(  # noqa: PLR0912, PLR0915
             tasks=args.tasks,
             balance_guide=args.balance_guide,
             max_len=args.max_len,
+            is_single_head=not fine_model_config.get("multi_head", False),
+            additional_token_types=ADDITIONAL_TOKEN_TYPES,
+            task_to_index_map={task: index for index, task in enumerate(args.tasks)},
         )
         val_dataset = FinetuneDatasetDecoder(
             data=fine_val,
@@ -109,6 +120,9 @@ def main(  # noqa: PLR0912, PLR0915
             tasks=args.tasks,
             balance_guide=args.balance_guide,
             max_len=args.max_len,
+            is_single_head=not fine_model_config.get("multi_head", False),
+            additional_token_types=ADDITIONAL_TOKEN_TYPES,
+            task_to_index_map={task: index for index, task in enumerate(args.tasks)},
         )
         test_dataset = FinetuneDatasetDecoder(
             data=fine_test,
@@ -116,6 +130,9 @@ def main(  # noqa: PLR0912, PLR0915
             tasks=args.tasks,
             balance_guide=None,
             max_len=args.max_len,
+            is_single_head=not fine_model_config.get("multi_head", False),
+            additional_token_types=ADDITIONAL_TOKEN_TYPES,
+            task_to_index_map={task: index for index, task in enumerate(args.tasks)},
         )
 
     elif args.is_multi_model:
@@ -146,16 +163,19 @@ def main(  # noqa: PLR0912, PLR0915
             data=fine_train,
             tokenizer=tokenizer,
             max_len=args.max_len,
+            additional_token_types=ADDITIONAL_TOKEN_TYPES,
         )
         val_dataset = FinetuneDataset(
             data=fine_val,
             tokenizer=tokenizer,
             max_len=args.max_len,
+            additional_token_types=ADDITIONAL_TOKEN_TYPES,
         )
         test_dataset = FinetuneDataset(
             data=fine_test,
             tokenizer=tokenizer,
             max_len=args.max_len,
+            additional_token_types=ADDITIONAL_TOKEN_TYPES,
         )
 
     train_loader = DataLoader(
@@ -228,6 +248,8 @@ def main(  # noqa: PLR0912, PLR0915
         )
 
     elif args.model_type == "ehr_mamba":
+        if fine_model_config.get("multi_head", False):
+            fine_model_config["num_tasks"] = len(args.tasks)
         pretrained_model = MambaPretrain(
             vocab_size=tokenizer.get_vocab_size(),
             padding_idx=tokenizer.get_pad_token_id(),
@@ -495,7 +517,7 @@ if __name__ == "__main__":
     args.max_len = pre_model_config["max_seq_length"]
 
     # Process the tasks and balance guide arguments
-    args.tasks = args.tasks.strip().split(" ")
+    args.tasks = args.tasks.strip().split(" ") if args.tasks else []
     args.balance_guide = (
         {
             task: float(ratio)

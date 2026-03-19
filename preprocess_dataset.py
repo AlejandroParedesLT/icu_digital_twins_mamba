@@ -139,7 +139,7 @@ def build_age_tokens(
     return [25] * token_count
 
 
-def load_meds_data(meds_prep_dir: str) -> pd.DataFrame:
+def load_meds_data(meds_prep_dir: str) -> pl.LazyFrame:
     """
     Load preprocessed MEDS data from parquet files.
     
@@ -150,8 +150,8 @@ def load_meds_data(meds_prep_dir: str) -> pd.DataFrame:
         
     Returns
     -------
-    pd.DataFrame
-        Combined dataframe with all patient sequences
+    pl.LazyFrame
+        Lazy MEDS event frame
     """
     print(f"Loading MEDS data from {meds_prep_dir}...")
     
@@ -164,34 +164,22 @@ def load_meds_data(meds_prep_dir: str) -> pd.DataFrame:
     
     print(f"Found {len(parquet_files)} parquet files")
     
-    # Load all parquet files using polars for efficiency
-    dfs = []
-    for file in tqdm(parquet_files, desc="Loading parquet files"):
-        try:
-            df = pl.read_parquet(file)
-            dfs.append(df)
-        except Exception as e:
-            print(f"Warning: Could not load {file}: {e}")
-    
-    # Concatenate all dataframes
-    combined_df = pl.concat(dfs)
-    
-    # Convert to pandas for compatibility with existing code
-    df = combined_df.to_pandas()
-    
-    print(f"Loaded {len(df)} patient records")
-    return df
+    # Keep the heavy path lazy so we do not materialize 392M rows in pandas.
+    lazy_df = pl.scan_parquet(parquet_files)
+    print("Initialized lazy MEDS scan")
+    return lazy_df
 
 
-def load_patient_metadata(patients_path: str) -> pd.DataFrame:
+def load_patient_metadata(patients_path: str) -> pl.DataFrame:
     """Load patient-level metadata used to enrich MEDS events."""
     patients_fp = Path(patients_path)
     if patients_fp.suffix == ".parquet":
-        patients = pd.read_parquet(patients_fp)
+        patients = pl.read_parquet(patients_fp)
     else:
-        patients = pd.read_csv(patients_fp, compression="infer")
+        patients = pl.read_csv(patients_fp)
 
-    patients.columns = patients.columns.str.lower()
+    rename_map = {column: column.lower() for column in patients.columns}
+    patients = patients.rename(rename_map)
     if "subject_id" not in patients.columns:
         raise ValueError("patients file must contain a subject_id column")
 
@@ -205,25 +193,36 @@ def load_patient_metadata(patients_path: str) -> pd.DataFrame:
             "patients file does not contain anchor_age/anchor_year or year_of_birth for age derivation"
         )
 
-    patients = patients[keep_columns].copy()
-    patients["subject_id"] = pd.to_numeric(patients["subject_id"], errors="coerce").astype("Int64")
-    return patients.drop_duplicates(subset=["subject_id"])
+    patients = (
+        patients.select(keep_columns)
+        .with_columns(pl.col("subject_id").cast(pl.Int64, strict=False))
+        .unique(subset=["subject_id"], keep="first")
+    )
+    return patients
 
 
-def enrich_with_patient_metadata(df: pd.DataFrame, patients_path: str) -> pd.DataFrame:
+def enrich_with_patient_metadata(df: pl.LazyFrame, patients_path: str) -> pl.LazyFrame:
     """Merge patient metadata into MEDS events for age derivation."""
     print(f"Loading patient metadata from {patients_path}...")
     patients = load_patient_metadata(patients_path)
-    enriched = df.merge(patients, on="subject_id", how="left")
+    enriched = df.join(patients.lazy(), on="subject_id", how="left")
 
-    if "year_of_birth" in enriched.columns and "anchor_year" not in enriched.columns:
-        event_year = pd.to_datetime(enriched["time"], errors="coerce").dt.year
-        birth_year = pd.to_numeric(enriched["year_of_birth"], errors="coerce")
-        enriched["anchor_year"] = birth_year
-        enriched["anchor_age"] = (event_year - birth_year).clip(lower=0)
+    if "year_of_birth" in patients.columns and "anchor_year" not in patients.columns:
+        enriched = enriched.with_columns(
+            [
+                pl.col("year_of_birth").cast(pl.Int64, strict=False).alias("anchor_year"),
+                (
+                    pl.col("time").cast(pl.Datetime, strict=False).dt.year()
+                    - pl.col("year_of_birth").cast(pl.Int64, strict=False)
+                )
+                .clip(lower_bound=0)
+                .alias("anchor_age"),
+            ]
+        )
 
-    found_anchor_age = "anchor_age" in enriched.columns and enriched["anchor_age"].notna().any()
-    found_anchor_year = "anchor_year" in enriched.columns and enriched["anchor_year"].notna().any()
+    schema_names = set(enriched.collect_schema().names())
+    found_anchor_age = "anchor_age" in schema_names
+    found_anchor_year = "anchor_year" in schema_names
     print(
         "Patient metadata merge complete:",
         {
@@ -242,7 +241,7 @@ def ensure_patient_id_column(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 
-def extract_sequences_from_meds(df: pd.DataFrame, max_len: int = 2048) -> pd.DataFrame:
+def extract_sequences_from_meds(df: pl.LazyFrame, max_len: int = 2048) -> pd.DataFrame:
     """
     Extract and structure sequences from MEDS format.
     
@@ -262,68 +261,94 @@ def extract_sequences_from_meds(df: pd.DataFrame, max_len: int = 2048) -> pd.Dat
         Structured dataframe with sequences
     """
     print("Extracting sequences from MEDS format...")
-    
-    # Group by patient_id and aggregate sequences
-    # Note: Adjust these column names based on your actual MEDS output
-    patient_sequences = []
-    import re
-    for patient_id, group in tqdm(df.groupby('subject_id'), desc="Processing patients"):
-        # Sort by timestamp
-        group = group.sort_values('time')
-        
-        # Extract different token types
-        event_tokens = [re.sub(r'[^A-Za-z0-9_]', '', str(t)) for t in group['code'].tolist()]
-        
-        # Create a record for this patient
-        record = {
-            'subject_id': patient_id,
-            f'event_tokens_{max_len}': event_tokens[:max_len],
-            'num_visits': len(group[group['code'] == '[VS]']) if '[VS]' in event_tokens else 1,
-        }
-        
-        # Build token type ids for every event.
-        if 'code_type' in group.columns:
-            type_tokens = pd.to_numeric(group['code_type'], errors='coerce')
-            if type_tokens.notna().any():
-                record[f'type_tokens_{max_len}'] = (
-                    type_tokens.fillna(TYPE_MAP["other"]).astype(int).tolist()[:max_len]
-                )
-            else:
-                record[f'type_tokens_{max_len}'] = [
-                    infer_token_type(token) for token in event_tokens[:max_len]
-                ]
-        else:
-            record[f'type_tokens_{max_len}'] = [
-                infer_token_type(token) for token in event_tokens[:max_len]
-            ]
 
-        # Prefer true age emitted by MEDS preprocessing, otherwise derive a fallback.
-        record[f'age_tokens_{max_len}'] = build_age_tokens(group, event_tokens, max_len)
+    schema_names = set(df.collect_schema().names())
 
-        if 'time_token' in group.columns:
-            record[f'time_tokens_{max_len}'] = group['time_token'].tolist()[:max_len]
-        
-        # Position and visit tokens (if not present, create them)
-        record[f'position_tokens_{max_len}'] = list(range(len(event_tokens[:max_len])))
-        
-        # Calculate elapsed time tokens (hours since start)
-        if 'time' in group.columns:
-            times = pd.to_datetime(group['time'])
-            start_time = times.min()
-            elapsed_hours = [(t - start_time).total_seconds() / 3600 for t in times]
-            record[f'elapsed_tokens_{max_len}'] = elapsed_hours[:max_len]
-        
-        # Visit segments (simplified - assign visit number to each event)
-        visit_segments = []
-        current_visit = 0
-        for token in event_tokens[:max_len]:
-            if token == '[VS]':
-                current_visit += 1
-            visit_segments.append(current_visit)
-        record[f'visit_tokens_{max_len}'] = visit_segments
-        
-        patient_sequences.append(record)
-    sequences_df = pd.DataFrame(patient_sequences)
+    time_expr = pl.col("time").cast(pl.Datetime, strict=False)
+    clean_code_expr = pl.col("code").cast(pl.Utf8).str.replace_all(r"[^A-Za-z0-9_]", "")
+    raw_code_expr = pl.col("code").cast(pl.Utf8)
+
+    type_expr = (
+        pl.when(clean_code_expr.is_in(["MEDS_BIRTH", "MEDS_DEATH", "CLS", "PAD", "BOS", "EOS"]))
+        .then(pl.lit(TYPE_MAP["special"]))
+        .when(clean_code_expr.str.starts_with("DIAGNOSIS"))
+        .then(pl.lit(TYPE_MAP["diagnosis"]))
+        .when(clean_code_expr.str.starts_with("LAB"))
+        .then(pl.lit(TYPE_MAP["lab"]))
+        .when(clean_code_expr.str.starts_with("MEDICATION"))
+        .then(pl.lit(TYPE_MAP["medication"]))
+        .when(clean_code_expr.str.starts_with("PROCEDURE"))
+        .then(pl.lit(TYPE_MAP["procedure"]))
+        .when(clean_code_expr.str.starts_with("TRANSFER_TO"))
+        .then(pl.lit(TYPE_MAP["transfer"]))
+        .when(clean_code_expr.str.starts_with("ICU"))
+        .then(pl.lit(TYPE_MAP["icu"]))
+        .when(clean_code_expr.str.starts_with("INFUSION"))
+        .then(pl.lit(TYPE_MAP["infusion"]))
+        .otherwise(pl.lit(TYPE_MAP["other"]))
+    )
+
+    if "age" in schema_names:
+        age_expr = pl.col("age").cast(pl.Int64, strict=False).fill_null(strategy="forward").fill_null(strategy="backward")
+    elif {"anchor_age", "anchor_year"}.issubset(schema_names):
+        age_expr = (
+            pl.col("anchor_age").cast(pl.Int64, strict=False).fill_null(strategy="forward").fill_null(strategy="backward")
+            + (
+                time_expr.dt.year()
+                - pl.col("anchor_year").cast(pl.Int64, strict=False).fill_null(strategy="forward").fill_null(strategy="backward")
+            )
+        ).clip(lower_bound=0)
+    else:
+        age_expr = pl.lit(25, dtype=pl.Int64)
+
+    num_patients = (
+        df.select(pl.col("subject_id").n_unique().alias("n_patients"))
+        .collect()
+        .item()
+    )
+    print(f"Preparing to aggregate {num_patients} unique patients with Polars")
+
+    sorted_df = df.sort(["subject_id", "time"])
+    agg_exprs = [
+        clean_code_expr.slice(0, max_len).alias(f"event_tokens_{max_len}"),
+        pl.len().alias("event_count"),
+        (
+            pl.when(raw_code_expr == "[VS]")
+            .then(pl.lit(1))
+            .otherwise(pl.lit(0))
+            .sum()
+        ).alias("_num_visit_markers"),
+        type_expr.cast(pl.Int64).slice(0, max_len).alias(f"type_tokens_{max_len}"),
+        age_expr.cast(pl.Int64).slice(0, max_len).alias(f"age_tokens_{max_len}"),
+        pl.int_ranges(pl.lit(0), pl.len()).slice(0, max_len).alias(f"position_tokens_{max_len}"),
+        (
+            (time_expr - time_expr.first()).dt.total_seconds() / 3600.0
+        ).cast(pl.Float64).slice(0, max_len).alias(f"elapsed_tokens_{max_len}"),
+        (
+            pl.when(raw_code_expr == "[VS]")
+            .then(pl.lit(1))
+            .otherwise(pl.lit(0))
+            .cum_sum()
+        ).cast(pl.Int64).slice(0, max_len).alias(f"visit_tokens_{max_len}"),
+    ]
+    if "time_token" in schema_names:
+        agg_exprs.append(
+            pl.col("time_token").slice(0, max_len).alias(f"time_tokens_{max_len}")
+        )
+
+    sequences_pl = (
+        sorted_df.group_by("subject_id", maintain_order=True)
+        .agg(agg_exprs)
+        .with_columns(
+            pl.when(pl.col("_num_visit_markers") > 0)
+            .then(pl.col("_num_visit_markers"))
+            .otherwise(pl.lit(1))
+            .alias("num_visits")
+        )
+        .drop(["_num_visit_markers", "event_count"], strict=False)
+    )
+
+    sequences_df = sequences_pl.collect(streaming=True).to_pandas()
     print(f"Created sequences for {len(sequences_df)} patients")
     
     return sequences_df
@@ -438,7 +463,7 @@ def create_train_test_splits(
         'pretrain': pretrain_ids,
         'test': test_ids,
         'finetune': {
-            'few_shot': {}
+            'few_shot': {'all': pretrain_ids}
         }
     }
     

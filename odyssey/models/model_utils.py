@@ -204,6 +204,9 @@ def load_finetune_data(
         raise FileNotFoundError(f"ID file not found: {id_path}")
 
     data = pd.read_parquet(sequence_path)
+    if "patient_id" not in data.columns and "subject_id" in data.columns:
+        data["patient_id"] = data["subject_id"]
+    data = normalize_token_columns(data, max_len=2048)
     with open(id_path, "rb") as file:
         patient_ids = pickle.load(file)
 

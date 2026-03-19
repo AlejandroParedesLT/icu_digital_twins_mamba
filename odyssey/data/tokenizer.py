@@ -105,10 +105,10 @@ class ConceptTokenizer:
         self.unknown_token = unknown_token
         self.padding_side = padding_side
 
-        self.task_tokens = ["[MOR_1M]", "[LOS_1W]", "[REA_1M]"] + [
+        self.task_tokens = ["[MOR_1M]", "[LOS_1W]", "[REA_1M]", "[SEPSIS]"] + [
             f"[C{i}]" for i in range(0, 5)
         ]
-        self.tasks = ["mortality_1month", "los_1week", "readmission_1month"] + [
+        self.tasks = ["mortality_1month", "los_1week", "readmission_1month", "sepsis"] + [
             f"c{i}" for i in range(5)
         ]
         self.task2token = self.create_task_to_token_dict()
@@ -595,6 +595,7 @@ class ConceptTokenizer:
             "mortality_1month": "[MOR_1M]",
             "los_1week": "[LOS_1W]",
             "readmission_1month": "[REA_1M]",
+            "sepsis": "[SEPSIS]",
         }
         for i in range(5):
             task2token[f"c{i}"] = f"[C{i}]"
