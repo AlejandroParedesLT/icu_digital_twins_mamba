@@ -234,6 +234,14 @@ def enrich_with_patient_metadata(df: pd.DataFrame, patients_path: str) -> pd.Dat
     return enriched
 
 
+def ensure_patient_id_column(df: pd.DataFrame) -> pd.DataFrame:
+    """Mirror subject_id into patient_id for downstream Odyssey utilities."""
+    if "patient_id" not in df.columns and "subject_id" in df.columns:
+        df = df.copy()
+        df["patient_id"] = df["subject_id"]
+    return df
+
+
 def extract_sequences_from_meds(df: pd.DataFrame, max_len: int = 2048) -> pd.DataFrame:
     """
     Extract and structure sequences from MEDS format.
@@ -560,10 +568,14 @@ def main():
             sequences_df.to_parquet(sequence_file, index=False)
             print(f"Saved intermediate sequences to {sequence_file}")
 
+        sequences_df = ensure_patient_id_column(sequences_df)
+
         # Step 3: Add task labels (if applicable)
         sequences_df = add_task_labels(sequences_df, max_len=args.max_len)
         sequences_df.to_parquet(labeled_sequence_file, index=False)
         print(f"Saved labeled sequences to {labeled_sequence_file}")
+
+    sequences_df = ensure_patient_id_column(sequences_df)
 
     # Step 4: Create vocabularies
     event_vocab_file = os.path.join(vocab_dir, "event_vocab.json")
