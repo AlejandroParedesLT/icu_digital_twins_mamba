@@ -20,6 +20,7 @@ import argparse
 import glob
 import json
 import os
+import pickle
 from pathlib import Path
 from typing import Any, Dict, List
 
@@ -91,6 +92,25 @@ def build_age_tokens(
         if not age_values.empty and age_values.notna().any():
             return age_values.fillna(age_values.iloc[0]).astype(int).tolist()[:max_len]
 
+    if {"anchor_age", "anchor_year", "time"}.issubset(group.columns):
+        anchor_age = pd.to_numeric(group["anchor_age"], errors="coerce").ffill().bfill()
+        anchor_year = pd.to_numeric(group["anchor_year"], errors="coerce").ffill().bfill()
+        event_year = pd.to_datetime(group["time"], errors="coerce").dt.year
+
+        if (
+            not anchor_age.empty
+            and not anchor_year.empty
+            and anchor_age.notna().any()
+            and anchor_year.notna().any()
+            and event_year.notna().any()
+        ):
+            age_values = (
+                anchor_age.fillna(anchor_age.iloc[0])
+                + (event_year - anchor_year.fillna(anchor_year.iloc[0]))
+            )
+            age_values = age_values.fillna(method="ffill").fillna(method="bfill")
+            return age_values.clip(lower=0).astype(int).tolist()[:max_len]
+
     if "time" not in group.columns:
         return [25] * token_count
 
@@ -161,6 +181,57 @@ def load_meds_data(meds_prep_dir: str) -> pd.DataFrame:
     
     print(f"Loaded {len(df)} patient records")
     return df
+
+
+def load_patient_metadata(patients_path: str) -> pd.DataFrame:
+    """Load patient-level metadata used to enrich MEDS events."""
+    patients_fp = Path(patients_path)
+    if patients_fp.suffix == ".parquet":
+        patients = pd.read_parquet(patients_fp)
+    else:
+        patients = pd.read_csv(patients_fp, compression="infer")
+
+    patients.columns = patients.columns.str.lower()
+    if "subject_id" not in patients.columns:
+        raise ValueError("patients file must contain a subject_id column")
+
+    keep_columns = [
+        column
+        for column in ["subject_id", "anchor_age", "anchor_year", "dod", "year_of_birth"]
+        if column in patients.columns
+    ]
+    if len(keep_columns) == 1:
+        raise ValueError(
+            "patients file does not contain anchor_age/anchor_year or year_of_birth for age derivation"
+        )
+
+    patients = patients[keep_columns].copy()
+    patients["subject_id"] = pd.to_numeric(patients["subject_id"], errors="coerce").astype("Int64")
+    return patients.drop_duplicates(subset=["subject_id"])
+
+
+def enrich_with_patient_metadata(df: pd.DataFrame, patients_path: str) -> pd.DataFrame:
+    """Merge patient metadata into MEDS events for age derivation."""
+    print(f"Loading patient metadata from {patients_path}...")
+    patients = load_patient_metadata(patients_path)
+    enriched = df.merge(patients, on="subject_id", how="left")
+
+    if "year_of_birth" in enriched.columns and "anchor_year" not in enriched.columns:
+        event_year = pd.to_datetime(enriched["time"], errors="coerce").dt.year
+        birth_year = pd.to_numeric(enriched["year_of_birth"], errors="coerce")
+        enriched["anchor_year"] = birth_year
+        enriched["anchor_age"] = (event_year - birth_year).clip(lower=0)
+
+    found_anchor_age = "anchor_age" in enriched.columns and enriched["anchor_age"].notna().any()
+    found_anchor_year = "anchor_year" in enriched.columns and enriched["anchor_year"].notna().any()
+    print(
+        "Patient metadata merge complete:",
+        {
+            "anchor_age_present": bool(found_anchor_age),
+            "anchor_year_present": bool(found_anchor_year),
+        },
+    )
+    return enriched
 
 
 def extract_sequences_from_meds(df: pd.DataFrame, max_len: int = 2048) -> pd.DataFrame:
@@ -276,15 +347,8 @@ def create_vocabularies(df: pd.DataFrame, output_dir: str, max_len: int = 2048) 
     )
     print(f"Created event vocabulary")
     
-    # Create vocabularies for other token types if present
-    for token_type in ['type', 'age', 'time']:
-        col_name = f'{token_type}_tokens_{max_len}'
-        if col_name in df.columns:
-            ConceptTokenizer.create_vocab_from_sequences(
-                sequences=df[col_name],
-                save_path=os.path.join(vocab_dir, f"{token_type}_vocab.json")
-            )
-            print(f"Created {token_type} vocabulary")
+    # Numeric side channels are consumed directly by the model and should not
+    # be added to the tokenizer vocabulary.
 
 
 def add_task_labels(df: pd.DataFrame, max_len: int = 2048) -> pd.DataFrame:
@@ -448,6 +512,12 @@ def main():
         default=0.15,
         help='Proportion of data for test set (default: 0.15)'
     )
+    parser.add_argument(
+        '--patients_path',
+        type=str,
+        default=None,
+        help='Optional path to MIMIC patients table for deriving event-level age tokens',
+    )
     print('Processing')
     
     args = parser.parse_args()
@@ -455,46 +525,83 @@ def main():
     # Create output directory
     os.makedirs(args.output_dir, exist_ok=True)
 
-    # Step 1: Load MEDS data
-    df = load_meds_data(args.meds_prep_dir)
-    print('Loaded meds data')
-
-    # Step 2: Extract sequences
-    sequences_df = extract_sequences_from_meds(df, max_len=args.max_len)
-
-    # Step 3: Create vocabularies
-    print('Creating vocabularies')
-    vocab_dir = os.path.join(args.output_dir, "vocab")
-    create_vocabularies(sequences_df, args.output_dir, max_len=args.max_len)
-
-    # Step 4: Initialize tokenizer
-    print("Initializing tokenizer...")
-    tokenizer = ConceptTokenizer(data_dir=vocab_dir)
-    tokenizer.fit_on_vocab(with_tasks=True)
-
-    # Save tokenizer
-    tokenizer_dir = os.path.join(args.output_dir, "tokenizer")
-    tokenizer.save(tokenizer_dir)
-    print(f"Saved tokenizer to {tokenizer_dir}")
-
-    # Step 5: Add task labels (if applicable)
-    sequences_df = add_task_labels(sequences_df, max_len=args.max_len)
-    
-    # Step 6: Save patient sequences as parquet
     sequence_dir = os.path.join(args.output_dir, "patient_sequences")
     os.makedirs(sequence_dir, exist_ok=True)
     sequence_file = os.path.join(sequence_dir, f"patient_sequences_{args.max_len}.parquet")
-    sequences_df.to_parquet(sequence_file, index=False)
-    print(f"Saved patient sequences to {sequence_file}")
-    
-    # Step 7: Create train/test splits
-    patient_ids_dict = create_train_test_splits(
-        df=sequences_df,
-        output_dir=os.path.join(args.output_dir, "patient_id_dict"),
-        test_size=args.test_size,
-        max_len=args.max_len,
+    labeled_sequence_file = os.path.join(
+        sequence_dir,
+        f"patient_sequences_{args.max_len}_labeled.parquet",
     )
-    
+
+    vocab_dir = os.path.join(args.output_dir, "vocab")
+    tokenizer_dir = os.path.join(args.output_dir, "tokenizer")
+    patient_id_dir = os.path.join(args.output_dir, "patient_id_dict")
+    patient_id_file = os.path.join(
+        patient_id_dir,
+        f"dataset_{args.max_len}_multi_v2.pkl",
+    )
+
+    if os.path.exists(labeled_sequence_file):
+        print(f"Loading labeled sequences from {labeled_sequence_file}")
+        sequences_df = pd.read_parquet(labeled_sequence_file)
+    else:
+        if os.path.exists(sequence_file):
+            print(f"Loading existing sequences from {sequence_file}")
+            sequences_df = pd.read_parquet(sequence_file)
+        else:
+            # Step 1: Load MEDS data
+            df = load_meds_data(args.meds_prep_dir)
+            print('Loaded meds data')
+            if args.patients_path:
+                df = enrich_with_patient_metadata(df, args.patients_path)
+
+            # Step 2: Extract sequences
+            sequences_df = extract_sequences_from_meds(df, max_len=args.max_len)
+            sequences_df.to_parquet(sequence_file, index=False)
+            print(f"Saved intermediate sequences to {sequence_file}")
+
+        # Step 3: Add task labels (if applicable)
+        sequences_df = add_task_labels(sequences_df, max_len=args.max_len)
+        sequences_df.to_parquet(labeled_sequence_file, index=False)
+        print(f"Saved labeled sequences to {labeled_sequence_file}")
+
+    # Step 4: Create vocabularies
+    event_vocab_file = os.path.join(vocab_dir, "event_vocab.json")
+    if os.path.exists(event_vocab_file):
+        print(f"Using existing vocabulary at {event_vocab_file}")
+    else:
+        print('Creating vocabularies')
+        create_vocabularies(sequences_df, args.output_dir, max_len=args.max_len)
+
+    # Step 5: Initialize tokenizer
+    if os.path.exists(tokenizer_dir):
+        print(f"Tokenizer directory already exists at {tokenizer_dir}")
+    else:
+        print("Initializing tokenizer...")
+        tokenizer = ConceptTokenizer(data_dir=vocab_dir)
+        tokenizer.fit_on_vocab(with_tasks=True)
+        tokenizer.save(tokenizer_dir)
+        print(f"Saved tokenizer to {tokenizer_dir}")
+
+    # Step 6: Create train/test splits
+    os.makedirs(patient_id_dir, exist_ok=True)
+    if os.path.exists(patient_id_file):
+        print(f"Using existing patient id dict at {patient_id_file}")
+        with open(patient_id_file, "rb") as file:
+            patient_ids_dict = pickle.load(file)
+    else:
+        patient_ids_dict = create_train_test_splits(
+            df=sequences_df,
+            output_dir=patient_id_dir,
+            test_size=args.test_size,
+            max_len=args.max_len,
+        )
+
+    # Preserve the original expected output path for compatibility.
+    if not os.path.exists(sequence_file):
+        sequences_df.to_parquet(sequence_file, index=False)
+        print(f"Saved patient sequences to {sequence_file}")
+
     print("\n" + "="*60)
     print("Dataset creation completed!")
     print("="*60)
