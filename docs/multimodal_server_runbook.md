@@ -1,55 +1,300 @@
 ## Multimodal Server Runbook
 
-This runbook builds the stay-level artifacts needed for:
+This runbook is organized around the actual modeling hierarchy:
 
-- EHR-only stay baseline
-- EHR + image fusion
-- EHR + CDE fusion
-- EHR + CDE + image fusion
+1. **Old patient-level pipeline** = pretrain the strong EHR Mamba backbone
+2. **Old patient-level finetuning** = the fastest baseline you can still run today
+3. **Stay-level pipeline** = align EHR, images, and CDE at `stay_id`
+4. **Fusion experiments** = build the final multimodal model on top of the backbone
 
-It uses the scripts already in this repo plus the new image-cache step.
+If you are presenting in a few hours, the practical recommendation is:
 
-### What Each Script Does
+1. run the **old finetuning pipeline first**
+2. if time permits, run **EHR + image stay-level fusion** as the first multimodal demo
 
-- [`build_master_stays.py`](/home/ap794/wspersonal/icu_digital_twins_mamba/data_pipelines/build_master_stays.py)
-  Builds one ICU-stay table with `stay_id`, timing, and mortality labels.
-- [`build_stay_image_index.py`](/home/ap794/wspersonal/icu_digital_twins_mamba/data_pipelines/build_stay_image_index.py)
-  Maps the CXR metadata CSV to ICU stays.
-- [`preprocess_stay_images.py`](/home/ap794/wspersonal/icu_digital_twins_mamba/data_pipelines/preprocess_stay_images.py)
-  Reads the stay-image index, resizes matched JPGs to a fixed size, saves `.pt` tensors, and writes back an updated index with `tensor_path`.
-- [`build_stay_sequences.py`](/home/ap794/wspersonal/icu_digital_twins_mamba/data_pipelines/build_stay_sequences.py)
-  Builds one token sequence per stay from MEDS events and writes `label_in_hosp_mortality`, `label_mortality_28d`, and `label_sepsis`.
-- [`train_stay_fusion.py`](/home/ap794/wspersonal/icu_digital_twins_mamba/training/train_stay_fusion.py)
-  Trains the stay-level EHR/CDE/image fusion models.
-- [`run_stay_ehr_only.sh`](/home/ap794/wspersonal/icu_digital_twins_mamba/launch/run_stay_ehr_only.sh)
-  Launches the EHR-only stay model.
-- [`run_stay_ehr_image.sh`](/home/ap794/wspersonal/icu_digital_twins_mamba/launch/run_stay_ehr_image.sh)
-  Launches EHR + image fusion.
-- [`run_stay_ehr_cde.sh`](/home/ap794/wspersonal/icu_digital_twins_mamba/launch/run_stay_ehr_cde.sh)
-  Launches EHR + CDE fusion.
-- [`run_stay_ehr_cde_image.sh`](/home/ap794/wspersonal/icu_digital_twins_mamba/launch/run_stay_ehr_cde_image.sh)
-  Launches EHR + CDE + image fusion.
+The old pipeline is still the best source of the pretrained backbone.  
+The stay-level pipeline is the correct abstraction for multimodal ICU prediction.
 
-### Assumed Paths
+### Model Hierarchy
+
+Think about the stack like this:
+
+- **Pretraining backbone**
+  - old patient-level sequence pipeline
+  - learns medication/event semantics and long-range EHR structure
+- **Old finetuning baseline**
+  - same patient-level pipeline
+  - fastest path to a first mortality/sepsis result
+- **Stay-level EHR encoder**
+  - reuse the pretrained backbone
+  - apply it to stay-specific sequences instead of patient-global ones
+- **Fusion model**
+  - combine stay-level EHR + image + CDE
+
+So:
+
+- the old pipeline is **not obsolete**
+- it is the **foundation**
+- the stay-level pipeline is the **alignment layer on top**
+
+## What Exists in This Repo
+
+### Old Patient-Level Pipeline
+
+- [`training/pretrain.py`](/home/ap794/wspersonal/icu_digital_twins_mamba/training/pretrain.py)
+- [`training/finetune.py`](/home/ap794/wspersonal/icu_digital_twins_mamba/training/finetune.py)
+- [`data_pipelines/preprocess_dataset.py`](/home/ap794/wspersonal/icu_digital_twins_mamba/data_pipelines/preprocess_dataset.py)
+
+Input unit:
+
+- one **patient-level** sequence row
+
+Typical file:
+
+- `data/patient_sequences/patient_sequences_2048.parquet`
+
+### New Stay-Level Multimodal Pipeline
+
+- [`data_pipelines/build_master_stays.py`](/home/ap794/wspersonal/icu_digital_twins_mamba/data_pipelines/build_master_stays.py)
+- [`data_pipelines/build_stay_image_index.py`](/home/ap794/wspersonal/icu_digital_twins_mamba/data_pipelines/build_stay_image_index.py)
+- [`data_pipelines/preprocess_stay_images.py`](/home/ap794/wspersonal/icu_digital_twins_mamba/data_pipelines/preprocess_stay_images.py)
+- [`data_pipelines/build_stay_sequences.py`](/home/ap794/wspersonal/icu_digital_twins_mamba/data_pipelines/build_stay_sequences.py)
+- [`training/train_stay_fusion.py`](/home/ap794/wspersonal/icu_digital_twins_mamba/training/train_stay_fusion.py)
+
+Input unit:
+
+- one **ICU stay** = one sample
+
+Typical file:
+
+- `data/stay_level/stay_sequences_2048.parquet`
+
+## Recommended Strategy For Today
+
+If you need results quickly:
+
+1. use your **existing pretrained backbone**
+2. run **old-pipeline finetuning** for the first baseline
+3. if you still have time, run **stay-level EHR + image** as the first fusion experiment
+
+Reason:
+
+- old finetuning is the shortest path to a working baseline
+- the old pipeline already matches your current parquet and split setup
+- image fusion today should be treated as a separate experiment, not jammed directly into the old finetune script
+
+## Assumed Server Paths
 
 Replace these with your real server paths if needed.
 
 ```bash
 export REPO=/hpc/group/kamaleswaranlab/capstone_icu_digital_twins/odyssey
+export CONFIG_DIR=$REPO/odyssey/models/configs
+
 export PRE_MEDS=/hpc/group/kamaleswaranlab/capstone_icu_digital_twins/meds/MIMIC-IV_Example/data/PRE_MEDS
 export MEDS_TRAIN=/hpc/group/kamaleswaranlab/capstone_icu_digital_twins/meds/MIMIC-IV_Example/data/MEDS_COHORT/merge_to_MEDS_cohort/train
-export CXR_CSV=/hpc/group/kamaleswaranlab/capstone_icu_digital_twins/odyssey/data/cxr_icu_multiple_studies_deduplicated_reports_preprocessed_with_jpg_paths.csv
 
-export STAY_ROOT=/hpc/group/kamaleswaranlab/capstone_icu_digital_twins/odyssey/data/stay_level
+export PATIENT_SEQ=$REPO/data/patient_sequences/patient_sequences_2048_labeled.parquet
+export ID_FILE=dataset_2048_multi_v2.pkl
+export VOCAB_DIR=$REPO/data/vocab
+
+export PRETRAINED_BACKBONE=/path/to/your/pretrained_backbone.ckpt
+```
+
+## Part A: From Zero To Backbone
+
+### A1. Build the Patient-Level Sequence Parquet
+
+Use the old preprocessing pipeline:
+
+```bash
+python $REPO/data_pipelines/preprocess_dataset.py \
+  --meds_prep_dir $MEDS_TRAIN \
+  --patients_path $PRE_MEDS/hosp/patients.parquet \
+  --output_dir $REPO/data
+```
+
+This should produce:
+
+- `data/patient_sequences/patient_sequences_2048.parquet`
+- `data/patient_sequences/patient_sequences_2048_labeled.parquet`
+- `data/patient_id_dict/dataset_2048_multi_v2.pkl`
+- `data/vocab/event_vocab.json`
+
+### A2. Optional: Repair Age Tokens If Needed
+
+If integrity checks show age is wrong, repair in place:
+
+```bash
+python $REPO/data_pipelines/fix_age_tokens_parquet.py \
+  $REPO/data/patient_sequences/patient_sequences_2048_labeled.parquet
+
+python $REPO/data_pipelines/fix_age_tokens_parquet.py \
+  $REPO/data/patient_sequences/patient_sequences_2048.parquet
+```
+
+### A3. Pretrain The Backbone
+
+The old patient-level sequence pipeline is the correct place to pretrain the EHR backbone.
+
+Example:
+
+```bash
+python $REPO/training/pretrain.py \
+  --model_type ehr_mamba \
+  --is_decoder True \
+  --exp_name mamba_pretrain_with_embeddings \
+  --config_dir $CONFIG_DIR \
+  --data_dir $REPO/data \
+  --sequence_file $REPO/data/patient_sequences/patient_sequences_2048.parquet \
+  --id_file $REPO/data/patient_id_dict/dataset_2048_multi_v2.pkl \
+  --vocab_dir $VOCAB_DIR \
+  --val_size 0.1 \
+  --checkpoint_dir $REPO/checkpoints/pretrain
+```
+
+Output:
+
+- pretrained Mamba checkpoint
+
+That checkpoint is the **backbone** used later by the stay-level fusion models.
+
+## Part B: Fastest Baseline For Today
+
+### B1. What You Need To Modify For Old-Pipeline Finetuning
+
+For a quick baseline, you do **not** need to redesign the old finetune script.
+
+What matters:
+
+- use the labeled patient parquet
+- use the current split pickle
+- point at your pretrained checkpoint
+- pick one target first, usually mortality
+
+For the simplest single-task run:
+
+- keep `model_finetune.multi_head: False` in [`ehr_mamba.yaml`](/home/ap794/wspersonal/icu_digital_twins_mamba/odyssey/models/configs/ehr_mamba.yaml)
+- do **not** try to joint-train mortality and sepsis for the first run
+- run one task at a time
+
+So for the first presentation result:
+
+- mortality first
+- optionally sepsis second if the label is present and you have time
+
+### B2. Old-Pipeline Mortality Finetuning
+
+This is the shortest path to a first result.
+
+```bash
+python $REPO/training/finetune.py \
+  --model-type ehr_mamba \
+  --exp-name finetune_mortality_old_pipeline \
+  --pretrained-path $PRETRAINED_BACKBONE \
+  --label-name label_mortality_1month \
+  --config-dir $CONFIG_DIR \
+  --is-decoder True \
+  --data-dir $REPO/data \
+  --sequence-file patient_sequences_2048_labeled.parquet \
+  --id-file $ID_FILE \
+  --vocab-dir $VOCAB_DIR \
+  --val-size 0.1 \
+  --valid_scheme few_shot \
+  --num_finetune_patients all \
+  --problem_type single_label_classification \
+  --num_labels 2 \
+  --checkpoint-dir $REPO/checkpoints \
+  --test_output_dir test_outputs
+```
+
+Important notes:
+
+- `--num_finetune_patients all` works because the current split pickle includes `finetune["few_shot"]["all"]`
+- this is the old **patient-level** baseline
+- this is not the stay-level baseline
+
+### B3. Old-Pipeline Sepsis Finetuning
+
+Only do this if your patient-level labeled parquet already contains `label_sepsis`.
+
+Check first:
+
+```bash
+python - <<'PY'
+import polars as pl
+df = pl.read_parquet("/hpc/group/kamaleswaranlab/capstone_icu_digital_twins/odyssey/data/patient_sequences/patient_sequences_2048_labeled.parquet")
+print("label_sepsis" in df.columns)
+if "label_sepsis" in df.columns:
+    print(df["label_sepsis"].value_counts())
+PY
+```
+
+If it exists, run:
+
+```bash
+python $REPO/training/finetune.py \
+  --model-type ehr_mamba \
+  --exp-name finetune_sepsis_old_pipeline \
+  --pretrained-path $PRETRAINED_BACKBONE \
+  --label-name label_sepsis \
+  --config-dir $CONFIG_DIR \
+  --is-decoder True \
+  --data-dir $REPO/data \
+  --sequence-file patient_sequences_2048_labeled.parquet \
+  --id-file $ID_FILE \
+  --vocab-dir $VOCAB_DIR \
+  --val-size 0.1 \
+  --valid_scheme few_shot \
+  --num_finetune_patients all \
+  --problem_type single_label_classification \
+  --num_labels 2 \
+  --checkpoint-dir $REPO/checkpoints \
+  --test_output_dir test_outputs
+```
+
+### B4. Do You Need To Modify The Old Finetuning Code?
+
+For the first single-task baseline:
+
+- **probably not**
+
+The most important thing is using the correct inputs:
+
+- labeled sequence parquet
+- valid split pickle
+- pretrained checkpoint
+
+For a fast presentation, I would **not** spend time changing the old finetune architecture unless it crashes.
+
+## Part C: Fastest Image Fusion Experiment For Today
+
+The old patient-level finetune script is **not** the right place to bolt images on today.
+
+For today, the cleanest image experiment is:
+
+1. keep the old patient-level finetune result as the baseline
+2. run a separate **stay-level EHR + image** experiment using the pretrained backbone
+
+That lets you present:
+
+- strong pretrained EHR baseline
+- initial multimodal fusion result with images
+
+### C1. Build Stay-Level Artifacts
+
+```bash
+export STAY_ROOT=$REPO/data/stay_level
 export MASTER_STAYS=$STAY_ROOT/master_stays.parquet
 export STAY_IMAGE_INDEX=$STAY_ROOT/stay_image_index.parquet
 export STAY_IMAGE_INDEX_CACHED=$STAY_ROOT/stay_image_index_cached.parquet
 export STAY_IMAGE_CACHE_DIR=$STAY_ROOT/image_cache
 export STAY_SEQUENCES=$STAY_ROOT/stay_sequences_2048.parquet
 export STAY_VOCAB_DIR=$STAY_ROOT/vocab
+export CXR_CSV=$REPO/data/cxr_icu_multiple_studies_deduplicated_reports_preprocessed_with_jpg_paths.csv
 ```
 
-### Step 1: Build the ICU Stay Master Table
+Build master stays:
 
 ```bash
 python $REPO/data_pipelines/build_master_stays.py \
@@ -59,17 +304,7 @@ python $REPO/data_pipelines/build_master_stays.py \
   --output-path $MASTER_STAYS
 ```
 
-Expected output:
-
-- `master_stays.parquet`
-- stay-level mortality labels
-
-### Step 2: Build the Stay-Level Image Index From the CXR CSV
-
-Recommended first pass:
-
-- keep all matched images
-- optionally later try `--first-hours-only 24`
+Build the stay-image index:
 
 ```bash
 python $REPO/data_pipelines/build_stay_image_index.py \
@@ -79,14 +314,7 @@ python $REPO/data_pipelines/build_stay_image_index.py \
   --keep-all-images
 ```
 
-Expected output:
-
-- `stay_image_index.parquet`
-- one or more rows per stay, one row per matched study
-
-### Step 3: Preprocess the Matched Images Into Tensor Cache
-
-This is strongly recommended. It avoids decoding JPGs inside every training batch.
+Cache the matched images:
 
 ```bash
 python $REPO/data_pipelines/preprocess_stay_images.py \
@@ -96,16 +324,7 @@ python $REPO/data_pipelines/preprocess_stay_images.py \
   --image-size 224
 ```
 
-Expected output:
-
-- `$STAY_IMAGE_CACHE_DIR/tensors_224/*.pt`
-- `stay_image_index_cached.parquet` with:
-  - `tensor_path`
-  - `tensor_exists`
-
-### Step 4: Build Stay-Level Sequences From MEDS
-
-This creates the EHR tower input.
+Build the stay-level EHR sequences:
 
 ```bash
 python $REPO/data_pipelines/build_stay_sequences.py \
@@ -117,56 +336,9 @@ python $REPO/data_pipelines/build_stay_sequences.py \
   --vocab-dir $STAY_VOCAB_DIR
 ```
 
-What gets written:
+### C2. Run EHR + Image Fusion
 
-- `event_tokens_2048`
-- `type_tokens_2048`
-- `age_tokens_2048`
-- `position_tokens_2048`
-- `elapsed_tokens_2048`
-- `visit_tokens_2048`
-- `label_in_hosp_mortality`
-- `label_mortality_28d`
-- `label_sepsis`
-
-### Step 5: Point to Your CDE Outputs
-
-Set these to the NCDE outputs your classmate pipeline already created.
-
-```bash
-export CDE_COEFFS_PATH=/path/to/cde/coeffs.pt
-export CDE_META_PATH=/path/to/cde/meta.parquet
-```
-
-The `meta.parquet` file must contain `stay_id` so the CDE rows line up with the stay-level sequences.
-
-### Step 6: Optional EHR Backbone Checkpoint
-
-If you want the fusion experiments to start from your pretrained Mamba:
-
-```bash
-export EHR_CHECKPOINT=/path/to/mamba_pretrain.ckpt
-export EHR_CONFIG_DIR=$REPO/odyssey/models/configs
-```
-
-If you do not set `EHR_CHECKPOINT`, the trainer falls back to a lightweight learned embedding encoder.
-
-### Step 7: Launch the Four Experiments
-
-#### 7A. EHR-only stay baseline
-
-This uses the stay-level EHR encoder plus task heads, with the other modalities masked out.
-
-```bash
-export STAY_SEQUENCES_PATH=$STAY_SEQUENCES
-export VOCAB_DIR=$STAY_VOCAB_DIR
-export OUTPUT_DIR=$REPO/checkpoints/stay_ehr_only
-export MODEL_TYPE=late
-
-bash $REPO/launch/run_stay_ehr_only.sh
-```
-
-#### 7B. EHR + image fusion
+Use the pretrained patient-level backbone as the EHR encoder initialization:
 
 ```bash
 export STAY_SEQUENCES_PATH=$STAY_SEQUENCES
@@ -176,11 +348,61 @@ export OUTPUT_DIR=$REPO/checkpoints/stay_ehr_image
 export MODEL_TYPE=late
 export IMAGE_SIZE=224
 export MAX_IMAGES_PER_STAY=4
+export EHR_CHECKPOINT=$PRETRAINED_BACKBONE
+export EHR_CONFIG_DIR=$CONFIG_DIR
 
 bash $REPO/launch/run_stay_ehr_image.sh
 ```
 
-#### 7C. EHR + CDE fusion
+This is the fastest way to show “we added images” without rewriting the old baseline trainer.
+
+## Part D: Full Stay-Level Multimodal Path
+
+Once the baseline and the first image fusion run are done, continue with the full stack.
+
+### D1. CDE Inputs
+
+Set these to your classmate’s NCDE outputs:
+
+```bash
+export CDE_COEFFS_PATH=/path/to/cde/coeffs.pt
+export CDE_META_PATH=/path/to/cde/meta.parquet
+```
+
+The `meta.parquet` file must contain `stay_id`.
+
+### D2. Launch The Stay-Level Experiments
+
+#### EHR-only stay baseline
+
+```bash
+export STAY_SEQUENCES_PATH=$STAY_SEQUENCES
+export VOCAB_DIR=$STAY_VOCAB_DIR
+export OUTPUT_DIR=$REPO/checkpoints/stay_ehr_only
+export MODEL_TYPE=late
+export EHR_CHECKPOINT=$PRETRAINED_BACKBONE
+export EHR_CONFIG_DIR=$CONFIG_DIR
+
+bash $REPO/launch/run_stay_ehr_only.sh
+```
+
+#### EHR + image
+
+```bash
+export STAY_SEQUENCES_PATH=$STAY_SEQUENCES
+export VOCAB_DIR=$STAY_VOCAB_DIR
+export IMAGE_INDEX_PATH=$STAY_IMAGE_INDEX_CACHED
+export OUTPUT_DIR=$REPO/checkpoints/stay_ehr_image
+export MODEL_TYPE=late
+export IMAGE_SIZE=224
+export MAX_IMAGES_PER_STAY=4
+export EHR_CHECKPOINT=$PRETRAINED_BACKBONE
+export EHR_CONFIG_DIR=$CONFIG_DIR
+
+bash $REPO/launch/run_stay_ehr_image.sh
+```
+
+#### EHR + CDE
 
 ```bash
 export STAY_SEQUENCES_PATH=$STAY_SEQUENCES
@@ -189,11 +411,13 @@ export CDE_COEFFS_PATH=$CDE_COEFFS_PATH
 export CDE_META_PATH=$CDE_META_PATH
 export OUTPUT_DIR=$REPO/checkpoints/stay_ehr_cde
 export MODEL_TYPE=late
+export EHR_CHECKPOINT=$PRETRAINED_BACKBONE
+export EHR_CONFIG_DIR=$CONFIG_DIR
 
 bash $REPO/launch/run_stay_ehr_cde.sh
 ```
 
-#### 7D. EHR + CDE + image fusion
+#### EHR + CDE + image
 
 ```bash
 export STAY_SEQUENCES_PATH=$STAY_SEQUENCES
@@ -205,73 +429,60 @@ export OUTPUT_DIR=$REPO/checkpoints/stay_ehr_cde_image
 export MODEL_TYPE=late
 export IMAGE_SIZE=224
 export MAX_IMAGES_PER_STAY=4
+export EHR_CHECKPOINT=$PRETRAINED_BACKBONE
+export EHR_CONFIG_DIR=$CONFIG_DIR
 
 bash $REPO/launch/run_stay_ehr_cde_image.sh
 ```
 
-### Recommended Training Order
+## Recommended Order Overall
 
-Run in this order:
+For the next few hours:
 
-1. EHR-only
-2. EHR + image
-3. EHR + CDE
-4. EHR + CDE + image
+1. old-pipeline mortality finetune
+2. old-pipeline sepsis finetune if label exists
+3. stay-level EHR + image
 
-That lets you measure the marginal value of each added modality.
+For the full project:
 
-### Recommended First Hyperparameters
+1. backbone pretraining
+2. old-pipeline baseline finetuning
+3. stay-level EHR-only
+4. stay-level EHR + image
+5. stay-level EHR + CDE
+6. stay-level EHR + CDE + image
 
-These are safe first settings on the server:
+## Practical Notes
 
-```bash
-export BATCH_SIZE=8
-export EPOCHS=10
-export NUM_WORKERS=4
-export VAL_RATIO=0.2
-export LEARNING_RATE=1e-4
-export WEIGHT_DECAY=1e-2
-export FUSION_DIM=256
-export MAX_LEN=2048
-export EHR_HIDDEN_SIZE=768
-export CDE_HIDDEN_SIZE=32
-export IMAGE_HIDDEN_SIZE=768
-```
+- The old patient-level baseline and the stay-level EHR-only baseline are **not the same experiment**.
+- The old pipeline is still the correct place to obtain the pretrained backbone.
+- The stay-level pipeline is the correct place to align images and CDE.
+- For today, do not try to force images directly into the old finetune script unless you are ready to debug a new model path.
+- The image cache step is worth doing. Raw JPG decoding in every training batch is much slower.
+- If GPU memory is tight, reduce:
+  - `BATCH_SIZE`
+  - `MAX_IMAGES_PER_STAY`
+- If you want a different fusion style later, change:
+  - `export MODEL_TYPE=gated`
+  - or `export MODEL_TYPE=cross`
 
-If GPU memory is tight:
+## Output Files To Expect
 
-- reduce `BATCH_SIZE`
-- reduce `MAX_IMAGES_PER_STAY`
-- keep `IMAGE_SIZE=224`
+Old finetune runs:
 
-### If You Want Cross-Attention Instead of Late Fusion
+- Lightning checkpoints in the chosen checkpoint directory
+- optional `test_outputs/*.pt`
 
-Change:
-
-```bash
-export MODEL_TYPE=cross
-```
-
-Or for a middle-ground baseline:
-
-```bash
-export MODEL_TYPE=gated
-```
-
-### Output Files to Expect
-
-Each experiment writes into its own output directory:
+Stay-level fusion runs:
 
 - `best_model.pt`
 - `last_model.pt`
 
-### Practical Notes
+## Bottom Line
 
-- The EHR-only baseline here uses the same stay-level training stack as the multimodal models, so the comparison is fairer than mixing one patient-level trainer with three stay-level trainers.
-- If your CDE `meta.parquet` uses a different stay id type than the stay-level EHR table, fix that first or the CDE tower will look missing for most rows.
-- The image cache step is worth doing. Raw JPG loading inside the training loop will be much slower.
-- If you want to restrict images to first-24h ICU studies, rebuild the stay-image index with `--first-hours-only 24` before the cache step.
+For presentation today:
 
-### Legacy Sequence-Only Fine-Tuning
+- use the **old pipeline** to show the backbone-based baseline
+- use **stay-level EHR + image** as the first multimodal add-on
 
-If you still want to run the original patient-sequence baseline with the old finetune script, use [`finetune.py`](/home/ap794/wspersonal/icu_digital_twins_mamba/training/finetune.py). That is a separate pipeline from the stay-level fusion experiments above.
+That matches the real architecture logic and avoids wasting time trying to graft images into the old patient-level finetune path right before a deadline.
