@@ -141,6 +141,22 @@ def normalize_token_columns(data: pd.DataFrame, max_len: int = 2048) -> pd.DataF
     return data
 
 
+def get_required_sequence_columns(max_len: int = 2048) -> list[str]:
+    """Return the minimal sequence columns needed for training/evaluation."""
+    return [
+        "subject_id",
+        f"event_tokens_{max_len}",
+        f"type_tokens_{max_len}",
+        f"age_tokens_{max_len}",
+        f"time_tokens_{max_len}",
+        f"position_tokens_{max_len}",
+        f"elapsed_tokens_{max_len}",
+        f"visit_tokens_{max_len}",
+        "patient_id",
+        "label",
+    ]
+
+
 def load_pretrain_data(
     data_dir: str,
     sequence_file: str,
@@ -155,14 +171,25 @@ def load_pretrain_data(
     if not os.path.exists(id_path):
         raise FileNotFoundError(f"ID file not found: {id_path}")
     
-    # Load data
-    data = pl.read_parquet(sequence_path).to_pandas()
-
     with open(id_path, "rb") as file:
         patient_ids = pickle.load(file)
-    data = data.loc[data["subject_id"].isin(patient_ids["pretrain"])]
+
+    pretrain_ids = patient_ids["pretrain"]
+    required_columns = get_required_sequence_columns(max_len=2048)
+    available_columns = set(pl.scan_parquet(sequence_path).collect_schema().names())
+    selected_columns = [column for column in required_columns if column in available_columns]
+
+    data = (
+        pl.scan_parquet(sequence_path)
+        .select(selected_columns)
+        .filter(pl.col("subject_id").is_in(pretrain_ids))
+        .collect(streaming=True)
+        .to_pandas()
+    )
+
+    if "patient_id" not in data.columns and "subject_id" in data.columns:
+        data["patient_id"] = data["subject_id"]
     data = normalize_token_columns(data, max_len=2048)
-    # Filter for pretrain patients
     return data
 
 
@@ -203,7 +230,14 @@ def load_finetune_data(
     if not os.path.exists(id_path):
         raise FileNotFoundError(f"ID file not found: {id_path}")
 
-    data = pd.read_parquet(sequence_path)
+    required_columns = get_required_sequence_columns(max_len=2048)
+    label_columns = [f"label_{task}" for task in ["mortality_1month", "readmission_1month", "los_1week", "sepsis"]]
+    available_columns = set(pl.scan_parquet(sequence_path).collect_schema().names())
+    selected_columns = [
+        column for column in required_columns + label_columns if column in available_columns
+    ]
+
+    data = pl.scan_parquet(sequence_path).select(selected_columns).collect(streaming=True).to_pandas()
     if "patient_id" not in data.columns and "subject_id" in data.columns:
         data["patient_id"] = data["subject_id"]
     data = normalize_token_columns(data, max_len=2048)

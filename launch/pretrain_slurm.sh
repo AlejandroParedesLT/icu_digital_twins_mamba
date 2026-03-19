@@ -22,12 +22,13 @@ echo "Conda environment: $(conda info --envs | grep '*' )"
 
 
 cd /hpc/group/kamaleswaranlab/capstone_icu_digital_twins/odyssey
+REPO_ROOT="$(pwd)"
 
 export CUBLAS_WORKSPACE_CONFIG=:4096:2
 export NCCL_DEBUG=INFO
 export PYTHONFAULTHANDLER=1
 
-stdbuf -oL -eL srun python3 pretrain.py  \
+stdbuf -oL -eL srun python3 "$REPO_ROOT/training/pretrain.py"  \
                 --model-type ehr_mamba \
                 --is-decoder True \
                 --exp-name mamba_pretrain_with_embeddings \

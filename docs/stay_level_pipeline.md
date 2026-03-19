@@ -2,14 +2,14 @@
 
 This repository now includes three stay-level data builders:
 
-- `build_master_stays.py`
-- `build_stay_image_index.py`
-- `build_stay_sequences.py`
+- `data_pipelines/build_master_stays.py`
+- `data_pipelines/build_stay_image_index.py`
+- `data_pipelines/build_stay_sequences.py`
 
 ### 1. Build the ICU stay master table
 
 ```bash
-python build_master_stays.py \
+python data_pipelines/build_master_stays.py \
   --icustays-path /path/to/PRE_MEDS/icu/icustays.csv.gz \
   --admissions-path /path/to/PRE_MEDS/hosp/admissions.csv.gz \
   --patients-path /path/to/PRE_MEDS/hosp/patients.parquet \
@@ -19,7 +19,7 @@ python build_master_stays.py \
 ### 2. Build the stay-aligned image index
 
 ```bash
-python build_stay_image_index.py \
+python data_pipelines/build_stay_image_index.py \
   --master-stays-path data/stay_level/master_stays.parquet \
   --cxr-csv-path data/cxr_icu_multiple_studies_deduplicated_reports_preprocessed_with_jpg_paths.csv \
   --output-path data/stay_level/stay_image_index.parquet \
@@ -31,7 +31,7 @@ To keep only early ICU images, add `--first-hours-only 24`.
 ### 3. Build stay-level token sequences from MEDS events
 
 ```bash
-python build_stay_sequences.py \
+python data_pipelines/build_stay_sequences.py \
   --meds-data-dir /path/to/MEDS_COHORT/data/train \
   --master-stays-path data/stay_level/master_stays.parquet \
   --output-path data/stay_level/stay_sequences_2048.parquet \
@@ -52,7 +52,7 @@ python build_stay_sequences.py \
 ### 4. Train the first multimodal fusion baseline
 
 ```bash
-python train_stay_fusion.py \
+python training/train_stay_fusion.py \
   --stay-sequences-path data/stay_level/stay_sequences_2048.parquet \
   --vocab-dir data/stay_level/vocab \
   --cde-coeffs-path /path/to/cde/coeffs.pt \

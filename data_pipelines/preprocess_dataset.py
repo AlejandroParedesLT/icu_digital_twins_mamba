@@ -21,24 +21,19 @@ import glob
 import json
 import os
 import pickle
+import random
+import sys
 from pathlib import Path
 from typing import Any, Dict, List
 
 import numpy as np
-import pandas as pd
 import polars as pl
-from tqdm import tqdm
+
+REPO_ROOT = Path(__file__).resolve().parents[1]
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
 
 from odyssey.data.tokenizer import ConceptTokenizer
-from odyssey.data.processor import (
-    get_pretrain_test_split,
-    get_finetune_split,
-    process_condition_dataset,
-    process_mortality_dataset,
-    process_readmission_dataset,
-    process_length_of_stay_dataset,
-    process_multi_dataset,
-)
 from odyssey.utils.utils import save_object_to_disk
 
 
@@ -53,90 +48,6 @@ TYPE_MAP = {
     "infusion": 7,
     "other": 8,
 }
-
-
-def infer_token_type(token: Any) -> int:
-    """Map event tokens to compact categorical type ids."""
-    if not isinstance(token, str):
-        return TYPE_MAP["other"]
-
-    if token in {"MEDS_BIRTH", "MEDS_DEATH", "[CLS]", "[PAD]", "[BOS]", "[EOS]"}:
-        return TYPE_MAP["special"]
-    if token.startswith("DIAGNOSIS"):
-        return TYPE_MAP["diagnosis"]
-    if token.startswith("LAB"):
-        return TYPE_MAP["lab"]
-    if token.startswith("MEDICATION"):
-        return TYPE_MAP["medication"]
-    if token.startswith("PROCEDURE"):
-        return TYPE_MAP["procedure"]
-    if token.startswith("TRANSFER_TO"):
-        return TYPE_MAP["transfer"]
-    if token.startswith("ICU"):
-        return TYPE_MAP["icu"]
-    if token.startswith("INFUSION"):
-        return TYPE_MAP["infusion"]
-    return TYPE_MAP["other"]
-
-
-def build_age_tokens(
-    group: pd.DataFrame,
-    event_tokens: List[str],
-    max_len: int,
-) -> List[int]:
-    """Build per-token age values using true age when available."""
-    token_count = min(len(event_tokens), max_len)
-
-    if "age" in group.columns:
-        age_values = pd.to_numeric(group["age"], errors="coerce").ffill().bfill()
-        if not age_values.empty and age_values.notna().any():
-            return age_values.fillna(age_values.iloc[0]).astype(int).tolist()[:max_len]
-
-    if {"anchor_age", "anchor_year", "time"}.issubset(group.columns):
-        anchor_age = pd.to_numeric(group["anchor_age"], errors="coerce").ffill().bfill()
-        anchor_year = pd.to_numeric(group["anchor_year"], errors="coerce").ffill().bfill()
-        event_year = pd.to_datetime(group["time"], errors="coerce").dt.year
-
-        if (
-            not anchor_age.empty
-            and not anchor_year.empty
-            and anchor_age.notna().any()
-            and anchor_year.notna().any()
-            and event_year.notna().any()
-        ):
-            age_values = (
-                anchor_age.fillna(anchor_age.iloc[0])
-                + (event_year - anchor_year.fillna(anchor_year.iloc[0]))
-            )
-            age_values = age_values.fillna(method="ffill").fillna(method="bfill")
-            return age_values.clip(lower=0).astype(int).tolist()[:max_len]
-
-    if "time" not in group.columns:
-        return [25] * token_count
-
-    times = pd.to_datetime(group["time"], errors="coerce")
-    valid_times = times.dropna()
-    if valid_times.empty:
-        return [25] * token_count
-
-    start_time = valid_times.min()
-    elapsed_hours = [
-        (timestamp - start_time).total_seconds() / 3600 if pd.notna(timestamp) else 0.0
-        for timestamp in times
-    ]
-
-    birth_index = next(
-        (i for i, token in enumerate(event_tokens) if token == "MEDS_BIRTH"),
-        None,
-    )
-    if birth_index is not None and birth_index < len(elapsed_hours):
-        birth_elapsed = elapsed_hours[birth_index]
-        return [
-            int(max((elapsed - birth_elapsed) / 24 / 365.25, 0))
-            for elapsed in elapsed_hours[:max_len]
-        ]
-
-    return [25] * token_count
 
 
 def load_meds_data(meds_prep_dir: str) -> pl.LazyFrame:
@@ -233,15 +144,14 @@ def enrich_with_patient_metadata(df: pl.LazyFrame, patients_path: str) -> pl.Laz
     return enriched
 
 
-def ensure_patient_id_column(df: pd.DataFrame) -> pd.DataFrame:
+def ensure_patient_id_column(df: pl.DataFrame) -> pl.DataFrame:
     """Mirror subject_id into patient_id for downstream Odyssey utilities."""
     if "patient_id" not in df.columns and "subject_id" in df.columns:
-        df = df.copy()
-        df["patient_id"] = df["subject_id"]
+        df = df.with_columns(pl.col("subject_id").alias("patient_id"))
     return df
 
 
-def extract_sequences_from_meds(df: pl.LazyFrame, max_len: int = 2048) -> pd.DataFrame:
+def extract_sequences_from_meds(df: pl.LazyFrame, max_len: int = 2048) -> pl.DataFrame:
     """
     Extract and structure sequences from MEDS format.
     
@@ -257,7 +167,7 @@ def extract_sequences_from_meds(df: pl.LazyFrame, max_len: int = 2048) -> pd.Dat
         
     Returns
     -------
-    pd.DataFrame
+    pl.DataFrame
         Structured dataframe with sequences
     """
     print("Extracting sequences from MEDS format...")
@@ -269,7 +179,11 @@ def extract_sequences_from_meds(df: pl.LazyFrame, max_len: int = 2048) -> pd.Dat
     raw_code_expr = pl.col("code").cast(pl.Utf8)
 
     type_expr = (
-        pl.when(clean_code_expr.is_in(["MEDS_BIRTH", "MEDS_DEATH", "CLS", "PAD", "BOS", "EOS"]))
+        pl.when(
+            clean_code_expr.is_in(
+                ["MEDS_BIRTH", "MEDS_DEATH", "[CLS]", "[PAD]", "[BOS]", "[EOS]"]
+            )
+        )
         .then(pl.lit(TYPE_MAP["special"]))
         .when(clean_code_expr.str.starts_with("DIAGNOSIS"))
         .then(pl.lit(TYPE_MAP["diagnosis"]))
@@ -289,13 +203,24 @@ def extract_sequences_from_meds(df: pl.LazyFrame, max_len: int = 2048) -> pd.Dat
     )
 
     if "age" in schema_names:
-        age_expr = pl.col("age").cast(pl.Int64, strict=False).fill_null(strategy="forward").fill_null(strategy="backward")
+        age_expr = (
+            pl.col("age")
+            .cast(pl.Int64, strict=False)
+            .fill_null(strategy="forward")
+            .fill_null(strategy="backward")
+        )
     elif {"anchor_age", "anchor_year"}.issubset(schema_names):
         age_expr = (
-            pl.col("anchor_age").cast(pl.Int64, strict=False).fill_null(strategy="forward").fill_null(strategy="backward")
+            pl.col("anchor_age")
+            .cast(pl.Int64, strict=False)
+            .fill_null(strategy="forward")
+            .fill_null(strategy="backward")
             + (
                 time_expr.dt.year()
-                - pl.col("anchor_year").cast(pl.Int64, strict=False).fill_null(strategy="forward").fill_null(strategy="backward")
+                - pl.col("anchor_year")
+                .cast(pl.Int64, strict=False)
+                .fill_null(strategy="forward")
+                .fill_null(strategy="backward")
             )
         ).clip(lower_bound=0)
     else:
@@ -348,13 +273,13 @@ def extract_sequences_from_meds(df: pl.LazyFrame, max_len: int = 2048) -> pd.Dat
         .drop(["_num_visit_markers", "event_count"], strict=False)
     )
 
-    sequences_df = sequences_pl.collect(streaming=True).to_pandas()
-    print(f"Created sequences for {len(sequences_df)} patients")
+    sequences_df = sequences_pl.collect(streaming=True)
+    print(f"Created sequences for {sequences_df.height} patients")
     
     return sequences_df
 
 
-def create_vocabularies(df: pd.DataFrame, output_dir: str, max_len: int = 2048) -> None:
+def create_vocabularies(df: pl.DataFrame, output_dir: str, max_len: int = 2048) -> None:
     """
     Create vocabulary files from sequences.
     
@@ -373,7 +298,7 @@ def create_vocabularies(df: pd.DataFrame, output_dir: str, max_len: int = 2048) 
     os.makedirs(vocab_dir, exist_ok=True)
     
     # Create vocabulary for event tokens
-    event_sequences = df[f'event_tokens_{max_len}']
+    event_sequences = df.get_column(f"event_tokens_{max_len}").to_list()
     ConceptTokenizer.create_vocab_from_sequences(
         sequences=event_sequences,
         save_path=os.path.join(vocab_dir, "event_vocab.json")
@@ -384,7 +309,7 @@ def create_vocabularies(df: pd.DataFrame, output_dir: str, max_len: int = 2048) 
     # be added to the tokenizer vocabulary.
 
 
-def add_task_labels(df: pd.DataFrame, max_len: int = 2048) -> pd.DataFrame:
+def add_task_labels(df: pl.DataFrame, max_len: int = 2048) -> pl.DataFrame:
     """
     Add task-specific labels for mortality, readmission, LOS, and conditions.
     
@@ -392,41 +317,54 @@ def add_task_labels(df: pd.DataFrame, max_len: int = 2048) -> pd.DataFrame:
     
     Parameters
     ----------
-    df : pd.DataFrame
+    df : pl.DataFrame
         Dataframe with patient sequences
     max_len : int
         Maximum sequence length
         
     Returns
     -------
-    pd.DataFrame
+    pl.DataFrame
         Dataframe with added labels
     """
     print("Adding task labels...")
-    
-    # Initialize label columns
-    df['death_after_start'] = -1
-    df['death_after_end'] = -1
-    df['common_conditions'] = [np.array([], dtype=np.int64) for _ in range(len(df))]
-    df['rare_conditions'] = [np.array([], dtype=np.int64) for _ in range(len(df))]
-    
-    # Process mortality labels
-    # Note: This assumes you have death information in your MEDS data
-    # You'll need to adjust based on your actual data structure
-    for idx, row in df.iterrows():
-        event_tokens = row[f'event_tokens_{max_len}']
-        
-        # Check for death indicator (adjust based on your coding)
-        if 'DEATH' in str(event_tokens) or any('deceased' in str(t).lower() for t in event_tokens):
-            # Simple heuristic - you'll need to calculate actual time differences
-            df.at[idx, 'death_after_start'] = 0
-            df.at[idx, 'death_after_end'] = 30  # Placeholder
-    
-    return df
+
+    def has_death(events: List[str]) -> bool:
+        return any(
+            ("DEATH" in str(token)) or ("deceased" in str(token).lower())
+            for token in (events or [])
+        )
+
+    return (
+        df.with_columns(
+            pl.col(f"event_tokens_{max_len}")
+            .map_elements(has_death, return_dtype=pl.Boolean)
+            .alias("_has_death")
+        )
+        .with_columns(
+            [
+                pl.when(pl.col("_has_death"))
+                .then(pl.lit(0))
+                .otherwise(pl.lit(-1))
+                .alias("death_after_start"),
+                pl.when(pl.col("_has_death"))
+                .then(pl.lit(30))
+                .otherwise(pl.lit(-1))
+                .alias("death_after_end"),
+                pl.when(pl.col("_has_death"))
+                .then(pl.lit(1))
+                .otherwise(pl.lit(0))
+                .alias("label_mortality_1month"),
+                pl.lit([], dtype=pl.List(pl.Int64)).alias("common_conditions"),
+                pl.lit([], dtype=pl.List(pl.Int64)).alias("rare_conditions"),
+            ]
+        )
+        .drop("_has_death")
+    )
 
 
 def create_train_test_splits(
-    df: pd.DataFrame,
+    df: pl.DataFrame,
     output_dir: str,
     test_size: float = 0.15,
     max_len: int = 2048,
@@ -436,7 +374,7 @@ def create_train_test_splits(
     
     Parameters
     ----------
-    df : pd.DataFrame
+    df : pl.DataFrame
         Dataframe with patient sequences and labels
     output_dir : str
         Directory to save split files
@@ -451,14 +389,15 @@ def create_train_test_splits(
         Dictionary with patient ID splits
     """
     print("Creating train/test splits...")
-    
-    # Create pretrain/test split
-    pretrain_ids, test_ids = get_pretrain_test_split(
-        dataset=df,
-        stratify_target=None,  # or specify a column to stratify on
-        test_size=test_size,
-    )
-    
+
+    patient_ids = df.get_column("patient_id").to_list()
+    rng = random.Random(23)
+    patient_ids = list(patient_ids)
+    rng.shuffle(patient_ids)
+    test_count = int(test_size * len(patient_ids))
+    test_ids = patient_ids[:test_count]
+    pretrain_ids = patient_ids[test_count:]
+
     patient_ids_dict = {
         'pretrain': pretrain_ids,
         'test': test_ids,
@@ -466,53 +405,11 @@ def create_train_test_splits(
             'few_shot': {'all': pretrain_ids}
         }
     }
-    
-    # If you have task-specific datasets, create finetune splits
-    # Example for mortality task
-    try:
-        # Process task datasets
-        df_mortality = process_mortality_dataset(df.copy())
-        df_readmission = process_readmission_dataset(df.copy(), max_len=max_len)
-        df_los = process_length_of_stay_dataset(df.copy(), threshold=7, max_len=max_len)
-        df_condition = process_condition_dataset(df.copy())
-        
-        # Create multi-task dataset
-        datasets = {
-            'original': df,
-            'mortality': df_mortality,
-            'readmission': df_readmission,
-            'los': df_los,
-            'condition': df_condition,
-        }
-        
-        multi_dataset = process_multi_dataset(datasets, max_len=max_len)
-        
-        # Define task configurations for finetune splits
-        task_config = {
-            'mortality_1month': {
-                'dataset': multi_dataset,
-                'label_col': 'label_mortality_1month',
-                'finetune_size': [100, 500, 1000],
-                'save_path': os.path.join(output_dir, f'dataset_{max_len}_multi_v2.pkl'),
-                'split_mode': 'single_label_stratified',
-            }
-        }
-        
-        # Create finetune splits
-        patient_ids_dict = get_finetune_split(
-            task_config=task_config,
-            task='mortality_1month',
-            patient_ids_dict=patient_ids_dict,
-        )
-        
-    except Exception as e:
-        print(f"Warning: Could not create task-specific splits: {e}")
-        print("Saving basic splits only...")
-        save_object_to_disk(
-            patient_ids_dict,
-            os.path.join(output_dir, f'dataset_{max_len}_multi_v2.pkl')
-        )
-    
+
+    save_object_to_disk(
+        patient_ids_dict,
+        os.path.join(output_dir, f'dataset_{max_len}_multi_v2.pkl')
+    )
     return patient_ids_dict
 
 
@@ -576,11 +473,11 @@ def main():
 
     if os.path.exists(labeled_sequence_file):
         print(f"Loading labeled sequences from {labeled_sequence_file}")
-        sequences_df = pd.read_parquet(labeled_sequence_file)
+        sequences_df = pl.read_parquet(labeled_sequence_file)
     else:
         if os.path.exists(sequence_file):
             print(f"Loading existing sequences from {sequence_file}")
-            sequences_df = pd.read_parquet(sequence_file)
+            sequences_df = pl.read_parquet(sequence_file)
         else:
             # Step 1: Load MEDS data
             df = load_meds_data(args.meds_prep_dir)
@@ -590,14 +487,14 @@ def main():
 
             # Step 2: Extract sequences
             sequences_df = extract_sequences_from_meds(df, max_len=args.max_len)
-            sequences_df.to_parquet(sequence_file, index=False)
+            sequences_df.write_parquet(sequence_file)
             print(f"Saved intermediate sequences to {sequence_file}")
 
         sequences_df = ensure_patient_id_column(sequences_df)
 
         # Step 3: Add task labels (if applicable)
         sequences_df = add_task_labels(sequences_df, max_len=args.max_len)
-        sequences_df.to_parquet(labeled_sequence_file, index=False)
+        sequences_df.write_parquet(labeled_sequence_file)
         print(f"Saved labeled sequences to {labeled_sequence_file}")
 
     sequences_df = ensure_patient_id_column(sequences_df)
@@ -636,7 +533,7 @@ def main():
 
     # Preserve the original expected output path for compatibility.
     if not os.path.exists(sequence_file):
-        sequences_df.to_parquet(sequence_file, index=False)
+        sequences_df.write_parquet(sequence_file)
         print(f"Saved patient sequences to {sequence_file}")
 
     print("\n" + "="*60)
@@ -646,7 +543,7 @@ def main():
     print(f"Patient sequences: {sequence_file}")
     print(f"Patient ID dict: {os.path.join(args.output_dir, 'patient_id_dict', f'dataset_{args.max_len}_multi_v2.pkl')}")
     print(f"Tokenizer: {tokenizer_dir}")
-    print(f"\nTotal patients: {len(sequences_df)}")
+    print(f"\nTotal patients: {sequences_df.height}")
     print(f"Train patients: {len(patient_ids_dict['pretrain'])}")
     print(f"Test patients: {len(patient_ids_dict['test'])}")
 

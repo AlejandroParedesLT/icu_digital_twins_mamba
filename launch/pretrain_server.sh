@@ -1,10 +1,13 @@
 #!/bin/bash
+set -euo pipefail
+
+REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
 # export CUBLAS_WORKSPACE_CONFIG=:4096:2
 export NCCL_DEBUG=INFO
 export PYTHONFAULTHANDLER=1
 
-python3 pretrain.py  \
+python3 "$REPO_ROOT/training/pretrain.py"  \
     --model_type ehr_mamba \
     --is_decoder True \
     --exp_name mamba_pretrain_with_embeddings \

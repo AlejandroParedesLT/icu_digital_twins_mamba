@@ -3,10 +3,16 @@
 from __future__ import annotations
 
 import argparse
+import re
 from pathlib import Path
+import sys
 from typing import Any
 
 import pandas as pd
+
+REPO_ROOT = Path(__file__).resolve().parents[1]
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
 
 from odyssey.data.stay_level import (
     TYPE_MAP,
@@ -15,6 +21,9 @@ from odyssey.data.stay_level import (
     sanitize_event_token,
 )
 from odyssey.data.tokenizer import ConceptTokenizer
+
+
+SEPSIS_PATTERN = re.compile(r"^(DIAGNOSIS//)?(038|A40|A41)", re.IGNORECASE)
 
 
 def load_master_stays(master_stays_path: Path) -> pd.DataFrame:
@@ -137,6 +146,10 @@ def build_sequence_record(stay_events: pd.DataFrame, max_len: int) -> dict[str, 
         for event_time in stay_events["event_time"].tolist()[:max_len]
     ]
 
+    sepsis_label = int(
+        stay_events["code"].astype(str).str.match(SEPSIS_PATTERN).fillna(False).any()
+    )
+
     return {
         "stay_id": int(stay_events["stay_id"].iloc[0]),
         "subject_id": int(stay_events["subject_id"].iloc[0]),
@@ -152,6 +165,7 @@ def build_sequence_record(stay_events: pd.DataFrame, max_len: int) -> dict[str, 
         "num_visits": 1,
         "label_in_hosp_mortality": int(stay_events["in_hosp_mortality"].max()),
         "label_mortality_28d": int(stay_events["mortality_28d"].max()),
+        "label_sepsis": sepsis_label,
     }
 
 

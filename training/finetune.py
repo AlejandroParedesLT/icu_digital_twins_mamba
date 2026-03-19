@@ -3,6 +3,7 @@
 import argparse
 import os
 import sys
+from pathlib import Path
 from typing import Any, Dict
 
 import numpy as np
@@ -18,6 +19,10 @@ from pytorch_lightning.strategies.ddp import DDPStrategy
 from sklearn.model_selection import train_test_split
 from skmultilearn.model_selection import iterative_train_test_split
 from torch.utils.data import DataLoader
+
+REPO_ROOT = Path(__file__).resolve().parents[1]
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
 
 from odyssey.data.dataset import (
     FinetuneDataset,

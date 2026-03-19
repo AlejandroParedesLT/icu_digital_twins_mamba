@@ -1,4 +1,7 @@
 #!/bin/bash
+set -euo pipefail
+
+REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
 # export CUBLAS_WORKSPACE_CONFIG=:4096:2
 # export NCCL_DEBUG=INFO
@@ -7,7 +10,7 @@
 
 # cd /hpc/home/aparedeslatorre1/icu_digital_twins_mamba
 
-# python3 pretrain.py \
+# python3 "$REPO_ROOT/training/pretrain.py" \
 #     --model_type ehr_mamba \
 #     --is_decoder True \
 #     --exp_name mamba_pretrain_with_embeddings \
@@ -26,7 +29,7 @@ export WANDB_DIR=/lstor/scratch/aparedeslatorre1/logs
 export WANDB_API_KEY=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
 export CUDA_VISIBLE_DEVICES=
 
-python3 pretrain.py \
+python3 "$REPO_ROOT/training/pretrain.py" \
     --model_type ehr_mamba \
     --is_decoder True \
     --exp_name mamba_pretrain_with_embeddings \

@@ -162,6 +162,14 @@ cython_debug/
 .python-version
 
 data/*
+data/**/*.parquet
+data/**/*.pkl
+data/stay_level/
+data/patient_id_dict/
 checkpoints/*
 logs/*
+wandb/
+*.pt
+*.ckpt
+*.pth
 .vscode

@@ -4,12 +4,17 @@ from __future__ import annotations
 
 import argparse
 from pathlib import Path
+import sys
 from typing import Optional
 
 import torch
 from torch import nn
 from torch.optim import AdamW
 from torch.utils.data import DataLoader, random_split
+
+REPO_ROOT = Path(__file__).resolve().parents[1]
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
 
 from odyssey.data.stay_fusion_dataset import StayFusionDataset, stay_fusion_collate
 from odyssey.data.tokenizer import ConceptTokenizer
@@ -147,6 +152,8 @@ def train(args: argparse.Namespace) -> None:
         cde_meta_path=args.cde_meta_path,
         image_index_path=args.image_index_path,
         image_root=args.image_root,
+        image_size=args.image_size,
+        max_images_per_stay=args.max_images_per_stay,
     )
 
     val_size = int(len(dataset) * args.val_ratio)
@@ -232,6 +239,8 @@ def main() -> None:
     parser.add_argument("--ehr-config-dir", type=str, default="odyssey/models/configs")
 
     parser.add_argument("--max-len", type=int, default=2048)
+    parser.add_argument("--image-size", type=int, default=224)
+    parser.add_argument("--max-images-per-stay", type=int, default=None)
     parser.add_argument("--num-tasks", type=int, default=3)
     parser.add_argument("--ehr-hidden-size", type=int, default=768)
     parser.add_argument("--cde-hidden-size", type=int, default=32)

@@ -33,12 +33,16 @@ class StayFusionDataset(Dataset):
         split_path: Optional[str] = None,
         split_name: Optional[str] = None,
         image_transform: Optional[Any] = None,
+        image_size: int = 224,
+        max_images_per_stay: Optional[int] = None,
     ) -> None:
         self.sequences = pd.read_parquet(stay_sequences_path).copy()
         self.tokenizer = tokenizer
         self.max_len = max_len
         self.image_root = Path(image_root) if image_root else None
         self.image_transform = image_transform
+        self.image_size = image_size
+        self.max_images_per_stay = max_images_per_stay
 
         if split_path and split_name:
             with open(split_path, "rb") as file:
@@ -63,12 +67,25 @@ class StayFusionDataset(Dataset):
             for idx, stay_id in enumerate(meta["stay_id"].astype(int).tolist()):
                 self.cde_by_stay[stay_id] = coeffs[idx]
 
-        self.images_by_stay: Dict[int, List[str]] = {}
+        self.images_by_stay: Dict[int, List[Dict[str, str]]] = {}
         if image_index_path:
             image_index = pd.read_parquet(image_index_path)
             image_index = image_index.sort_values(["stay_id", "StudyDateTime", "study_id"])
             for stay_id, group in image_index.groupby("stay_id"):
-                self.images_by_stay[int(stay_id)] = group["jpg_path"].dropna().astype(str).tolist()
+                image_records: List[Dict[str, str]] = []
+                for row in group.itertuples(index=False):
+                    record: Dict[str, str] = {}
+                    tensor_path = getattr(row, "tensor_path", None)
+                    jpg_path = getattr(row, "jpg_path", None)
+                    if isinstance(tensor_path, str) and tensor_path:
+                        record["tensor_path"] = tensor_path
+                    if isinstance(jpg_path, str) and jpg_path:
+                        record["jpg_path"] = jpg_path
+                    if record:
+                        image_records.append(record)
+                if self.max_images_per_stay is not None:
+                    image_records = image_records[: self.max_images_per_stay]
+                self.images_by_stay[int(stay_id)] = image_records
 
     def __len__(self) -> int:
         """Return the number of stay-aligned samples."""
@@ -99,27 +116,52 @@ class StayFusionDataset(Dataset):
             ),
         }
 
+    def _resolve_image_path(self, path_value: str) -> Path:
+        resolved = Path(path_value)
+        if self.image_root and not resolved.is_absolute():
+            resolved = self.image_root / resolved
+        return resolved
+
+    def _default_image_tensor(self, image: Image.Image) -> torch.Tensor:
+        resized = image.resize((self.image_size, self.image_size))
+        array = np.asarray(resized, dtype=np.uint8)
+        if array.ndim == 2:
+            array = np.stack([array] * 3, axis=-1)
+        tensor = torch.from_numpy(array).permute(2, 0, 1).float() / 255.0
+        return tensor
+
     def _load_images(self, stay_id: int) -> tuple[torch.Tensor, torch.Tensor]:
-        image_paths = self.images_by_stay.get(stay_id, [])
-        if not image_paths:
-            return torch.zeros(1, 3, 224, 224), torch.zeros(1, dtype=torch.float32)
+        image_records = self.images_by_stay.get(stay_id, [])
+        if not image_records:
+            return torch.zeros(1, 3, self.image_size, self.image_size), torch.zeros(1, dtype=torch.float32)
 
         tensors = []
-        for image_path in image_paths:
-            resolved = Path(image_path)
-            if self.image_root and not resolved.is_absolute():
-                resolved = self.image_root / resolved
-            if not resolved.exists():
+        for image_record in image_records:
+            tensor_path = image_record.get("tensor_path")
+            if tensor_path:
+                resolved_tensor = self._resolve_image_path(tensor_path)
+                if resolved_tensor.exists():
+                    tensor = torch.load(resolved_tensor, map_location="cpu")
+                    if tensor.dtype == torch.uint8:
+                        tensor = tensor.float() / 255.0
+                    tensors.append(tensor)
+                    continue
+
+            jpg_path = image_record.get("jpg_path")
+            if not jpg_path:
                 continue
-            image = Image.open(resolved).convert("RGB")
+            resolved_jpg = self._resolve_image_path(jpg_path)
+            if not resolved_jpg.exists():
+                continue
+            image = Image.open(resolved_jpg).convert("RGB")
             if self.image_transform is not None:
                 tensor = self.image_transform(image)
             else:
-                tensor = torch.from_numpy(np.asarray(image)).permute(2, 0, 1).float() / 255.0
+                tensor = self._default_image_tensor(image)
             tensors.append(tensor)
 
         if not tensors:
-            return torch.zeros(1, 3, 224, 224), torch.zeros(1, dtype=torch.float32)
+            return torch.zeros(1, 3, self.image_size, self.image_size), torch.zeros(1, dtype=torch.float32)
 
         return torch.stack(tensors), torch.ones(1, dtype=torch.float32)
 
