@@ -28,6 +28,15 @@ from odyssey.models.model_utils import (
 from odyssey.utils.utils import seed_everything
 
 
+ADDITIONAL_TOKEN_TYPES = [
+    "type_tokens",
+    "age_tokens",
+    "time_tokens",
+    "position_tokens",
+    "visit_tokens",
+]
+
+
 def main(args: argparse.Namespace, model_config: Dict[str, Any]) -> None:
     """Train the model."""
     seed_everything(args.seed)
@@ -74,15 +83,17 @@ def main(args: argparse.Namespace, model_config: Dict[str, Any]) -> None:
             data=pre_train,
             tokenizer=tokenizer,
             max_len=args.max_len,
+            additional_token_types=ADDITIONAL_TOKEN_TYPES,
             padding_side=args.padding_side,
-            return_attention_mask=args.return_attention_mask
+            return_attention_mask=args.return_attention_mask,
         )
         val_dataset = PretrainDatasetDecoder(
             data=pre_val,
             tokenizer=tokenizer,
             max_len=args.max_len,
+            additional_token_types=ADDITIONAL_TOKEN_TYPES,
             padding_side=args.padding_side,
-            return_attention_mask=args.return_attention_mask
+            return_attention_mask=args.return_attention_mask,
         )
         # train_dataset=PretrainWithImages(
         #     data=pre_train,
@@ -107,6 +118,7 @@ def main(args: argparse.Namespace, model_config: Dict[str, Any]) -> None:
             tokenizer=tokenizer,
             max_len=args.max_len,
             mask_prob=args.mask_prob,
+            additional_token_types=ADDITIONAL_TOKEN_TYPES,
             padding_side=args.padding_side,
         )
         val_dataset = PretrainDataset(
@@ -114,6 +126,7 @@ def main(args: argparse.Namespace, model_config: Dict[str, Any]) -> None:
             tokenizer=tokenizer,
             max_len=args.max_len,
             mask_prob=args.mask_prob,
+            additional_token_types=ADDITIONAL_TOKEN_TYPES,
             padding_side=args.padding_side,
         )
 

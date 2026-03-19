@@ -24,16 +24,17 @@ export WANDB_CONSOLE=off  # reduces overhead
 export WANDB_MODE=online
 export WANDB_DIR=/lstor/scratch/aparedeslatorre1/logs
 export WANDB_API_KEY=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
+export CUDA_VISIBLE_DEVICES=
 
 python3 pretrain.py \
     --model_type ehr_mamba \
     --is_decoder True \
     --exp_name mamba_pretrain_with_embeddings \
-    --config_dir /lstor/scratch/aparedeslatorre1/icu_digital_twins_mamba/odyssey/models/configs \
-    --data_dir /lstor/scratch/aparedeslatorre1/data/raw/train \
-    --sequence_file /lstor/scratch/aparedeslatorre1/data/patient_sequences/patient_sequences_2048.parquet \
-    --id_file /lstor/scratch/aparedeslatorre1/data/patient_id_dict/dataset_2048_multi_v2.pkl \
-    --vocab_dir /lstor/scratch/aparedeslatorre1/data/vocab \
+    --config_dir /odyssey/models/configs \
+    --data_dir /data/ \
+    --sequence_file /data/patient_sequences/patient_sequences_2048.parquet \
+    --id_file /data/patient_id_dict/dataset_2048_multi_v2.pkl \
+    --vocab_dir /data/vocab \
     --val_size 0.1 \
-    --checkpoint_dir /lstor/scratch/aparedeslatorre1/checkpoints \
-    --log_dir /lstor/scratch/aparedeslatorre1/logs
+    --checkpoint_dir /checkpoints \
+    --log_dir /logs

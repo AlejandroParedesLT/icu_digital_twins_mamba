@@ -21,7 +21,7 @@ import glob
 import json
 import os
 from pathlib import Path
-from typing import Dict, List
+from typing import Any, Dict, List
 
 import numpy as np
 import pandas as pd
@@ -39,6 +39,84 @@ from odyssey.data.processor import (
     process_multi_dataset,
 )
 from odyssey.utils.utils import save_object_to_disk
+
+
+TYPE_MAP = {
+    "special": 0,
+    "diagnosis": 1,
+    "lab": 2,
+    "medication": 3,
+    "procedure": 4,
+    "transfer": 5,
+    "icu": 6,
+    "infusion": 7,
+    "other": 8,
+}
+
+
+def infer_token_type(token: Any) -> int:
+    """Map event tokens to compact categorical type ids."""
+    if not isinstance(token, str):
+        return TYPE_MAP["other"]
+
+    if token in {"MEDS_BIRTH", "MEDS_DEATH", "[CLS]", "[PAD]", "[BOS]", "[EOS]"}:
+        return TYPE_MAP["special"]
+    if token.startswith("DIAGNOSIS"):
+        return TYPE_MAP["diagnosis"]
+    if token.startswith("LAB"):
+        return TYPE_MAP["lab"]
+    if token.startswith("MEDICATION"):
+        return TYPE_MAP["medication"]
+    if token.startswith("PROCEDURE"):
+        return TYPE_MAP["procedure"]
+    if token.startswith("TRANSFER_TO"):
+        return TYPE_MAP["transfer"]
+    if token.startswith("ICU"):
+        return TYPE_MAP["icu"]
+    if token.startswith("INFUSION"):
+        return TYPE_MAP["infusion"]
+    return TYPE_MAP["other"]
+
+
+def build_age_tokens(
+    group: pd.DataFrame,
+    event_tokens: List[str],
+    max_len: int,
+) -> List[int]:
+    """Build per-token age values using true age when available."""
+    token_count = min(len(event_tokens), max_len)
+
+    if "age" in group.columns:
+        age_values = pd.to_numeric(group["age"], errors="coerce").ffill().bfill()
+        if not age_values.empty and age_values.notna().any():
+            return age_values.fillna(age_values.iloc[0]).astype(int).tolist()[:max_len]
+
+    if "time" not in group.columns:
+        return [25] * token_count
+
+    times = pd.to_datetime(group["time"], errors="coerce")
+    valid_times = times.dropna()
+    if valid_times.empty:
+        return [25] * token_count
+
+    start_time = valid_times.min()
+    elapsed_hours = [
+        (timestamp - start_time).total_seconds() / 3600 if pd.notna(timestamp) else 0.0
+        for timestamp in times
+    ]
+
+    birth_index = next(
+        (i for i, token in enumerate(event_tokens) if token == "MEDS_BIRTH"),
+        None,
+    )
+    if birth_index is not None and birth_index < len(elapsed_hours):
+        birth_elapsed = elapsed_hours[birth_index]
+        return [
+            int(max((elapsed - birth_elapsed) / 24 / 365.25, 0))
+            for elapsed in elapsed_hours[:max_len]
+        ]
+
+    return [25] * token_count
 
 
 def load_meds_data(meds_prep_dir: str) -> pd.DataFrame:
@@ -110,7 +188,7 @@ def extract_sequences_from_meds(df: pd.DataFrame, max_len: int = 2048) -> pd.Dat
     # Note: Adjust these column names based on your actual MEDS output
     patient_sequences = []
     import re
-    for i, (patient_id, group) in enumerate(tqdm(df.groupby('subject_id'), desc="Processing patients")):
+    for patient_id, group in tqdm(df.groupby('subject_id'), desc="Processing patients"):
         # Sort by timestamp
         group = group.sort_values('time')
         
@@ -124,13 +202,25 @@ def extract_sequences_from_meds(df: pd.DataFrame, max_len: int = 2048) -> pd.Dat
             'num_visits': len(group[group['code'] == '[VS]']) if '[VS]' in event_tokens else 1,
         }
         
-        # Add other token types if available
+        # Build token type ids for every event.
         if 'code_type' in group.columns:
-            record[f'type_tokens_{max_len}'] = group['code_type'].tolist()[:max_len]
-        
-        if 'age' in group.columns:
-            record[f'age_tokens_{max_len}'] = group['age'].tolist()[:max_len]
-            
+            type_tokens = pd.to_numeric(group['code_type'], errors='coerce')
+            if type_tokens.notna().any():
+                record[f'type_tokens_{max_len}'] = (
+                    type_tokens.fillna(TYPE_MAP["other"]).astype(int).tolist()[:max_len]
+                )
+            else:
+                record[f'type_tokens_{max_len}'] = [
+                    infer_token_type(token) for token in event_tokens[:max_len]
+                ]
+        else:
+            record[f'type_tokens_{max_len}'] = [
+                infer_token_type(token) for token in event_tokens[:max_len]
+            ]
+
+        # Prefer true age emitted by MEDS preprocessing, otherwise derive a fallback.
+        record[f'age_tokens_{max_len}'] = build_age_tokens(group, event_tokens, max_len)
+
         if 'time_token' in group.columns:
             record[f'time_tokens_{max_len}'] = group['time_token'].tolist()[:max_len]
         
@@ -154,10 +244,6 @@ def extract_sequences_from_meds(df: pd.DataFrame, max_len: int = 2048) -> pd.Dat
         record[f'visit_tokens_{max_len}'] = visit_segments
         
         patient_sequences.append(record)
-
-        if i==100:
-            break
-    
     sequences_df = pd.DataFrame(patient_sequences)
     print(f"Created sequences for {len(sequences_df)} patients")
     
@@ -367,30 +453,32 @@ def main():
     args = parser.parse_args()
     
     # Create output directory
-    # os.makedirs(args.output_dir, exist_ok=True)
-    
-    # # Step 1: Load MEDS data
-    # df = load_meds_data(args.meds_prep_dir)
-    # print('LOaded meds data')
-    # # Step 2: Extract sequences
-    # sequences_df = extract_sequences_from_meds(df, max_len=args.max_len)
-    # print('Vocabularies')
-    # # Step 3: Create vocabularies
-    # vocab_dir = os.path.join(args.output_dir, "vocab")
-    # create_vocabularies(sequences_df, args.output_dir, max_len=args.max_len)
-    
-    # # Step 4: Initialize tokenizer
-    # print("Initializing tokenizer...")
-    # tokenizer = ConceptTokenizer(data_dir=vocab_dir)
-    # tokenizer.fit_on_vocab(with_tasks=True)
-    
-    # # Save tokenizer
-    # tokenizer_dir = os.path.join(args.output_dir, "tokenizer")
-    # tokenizer.save(tokenizer_dir)
-    # print(f"Saved tokenizer to {tokenizer_dir}")
-    
-    # # Step 5: Add task labels (if applicable)
-    # sequences_df = add_task_labels(sequences_df, max_len=args.max_len)
+    os.makedirs(args.output_dir, exist_ok=True)
+
+    # Step 1: Load MEDS data
+    df = load_meds_data(args.meds_prep_dir)
+    print('Loaded meds data')
+
+    # Step 2: Extract sequences
+    sequences_df = extract_sequences_from_meds(df, max_len=args.max_len)
+
+    # Step 3: Create vocabularies
+    print('Creating vocabularies')
+    vocab_dir = os.path.join(args.output_dir, "vocab")
+    create_vocabularies(sequences_df, args.output_dir, max_len=args.max_len)
+
+    # Step 4: Initialize tokenizer
+    print("Initializing tokenizer...")
+    tokenizer = ConceptTokenizer(data_dir=vocab_dir)
+    tokenizer.fit_on_vocab(with_tasks=True)
+
+    # Save tokenizer
+    tokenizer_dir = os.path.join(args.output_dir, "tokenizer")
+    tokenizer.save(tokenizer_dir)
+    print(f"Saved tokenizer to {tokenizer_dir}")
+
+    # Step 5: Add task labels (if applicable)
+    sequences_df = add_task_labels(sequences_df, max_len=args.max_len)
     
     # Step 6: Save patient sequences as parquet
     sequence_dir = os.path.join(args.output_dir, "patient_sequences")

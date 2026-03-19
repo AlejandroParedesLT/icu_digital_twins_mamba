@@ -2,10 +2,12 @@
 
 import os
 import pickle
+import re
 import uuid
 from os.path import join
 from typing import Any, Dict, Optional, Union
 
+import numpy as np
 import pandas as pd
 import polars as pl
 import torch
@@ -36,42 +38,106 @@ def load_config(config_dir: str, model_type: str) -> Any:
     config_file = join(config_dir, f"{model_type}.yaml")
     with open(config_file, "r") as file:
         return yaml.safe_load(file)
+TOKEN_TYPE_MAP = {
+    "special": 0,
+    "diagnosis": 1,
+    "lab": 2,
+    "medication": 3,
+    "procedure": 4,
+    "transfer": 5,
+    "icu": 6,
+    "infusion": 7,
+    "other": 8,
+}
 
 
-import numpy as np
-# import pandas as pd
+def infer_token_type(token: Any) -> int:
+    """Map a token string to a compact categorical type id."""
+    if not isinstance(token, str):
+        return TOKEN_TYPE_MAP["other"]
 
-def fix_missing_columns(data: pd.DataFrame, max_len: int = 2048) -> pd.DataFrame:
-    """Add missing token columns."""
-    data = data.copy()
-    
-    # Rename columns to remove _2048 suffix (except event_tokens)
-    data = data.rename(columns={
-        'position_tokens_2048': 'position_tokens',
-        'elapsed_tokens_2048': 'elapsed_tokens',  
-        'visit_tokens_2048': 'visit_tokens',
-    })
-    
-    # Add type_tokens - extract from event tokens
-    def extract_type_tokens(event_tokens):
-        types = []
-        for token in event_tokens:
-            if isinstance(token, str):
-                types.append(0)  # Default type
-            else:
-                types.append(0)
-        return np.array(types, dtype=int)
-    
-    data['type_tokens'] = data['event_tokens_2048'].apply(extract_type_tokens)
-    
-    # Add age_tokens - use 25 as default
-    data['age_tokens'] = data['event_tokens_2048'].apply(
-        lambda x: np.full(min(len(x), max_len), 25, dtype=int)
+    if token in {"MEDS_BIRTH", "MEDS_DEATH", "[CLS]", "[PAD]", "[BOS]", "[EOS]"}:
+        return TOKEN_TYPE_MAP["special"]
+    if token.startswith("DIAGNOSIS"):
+        return TOKEN_TYPE_MAP["diagnosis"]
+    if token.startswith("LAB"):
+        return TOKEN_TYPE_MAP["lab"]
+    if token.startswith("MEDICATION"):
+        return TOKEN_TYPE_MAP["medication"]
+    if token.startswith("PROCEDURE"):
+        return TOKEN_TYPE_MAP["procedure"]
+    if token.startswith("TRANSFER_TO"):
+        return TOKEN_TYPE_MAP["transfer"]
+    if token.startswith("ICU"):
+        return TOKEN_TYPE_MAP["icu"]
+    if token.startswith("INFUSION"):
+        return TOKEN_TYPE_MAP["infusion"]
+    return TOKEN_TYPE_MAP["other"]
+
+
+def estimate_age_tokens(
+    event_tokens: Any,
+    elapsed_tokens: Any,
+    default_age: int = 25,
+) -> np.ndarray:
+    """Estimate per-token age values when no explicit age tokens exist."""
+    tokens = list(event_tokens) if isinstance(event_tokens, (list, np.ndarray)) else []
+    elapsed = (
+        np.asarray(elapsed_tokens, dtype=float)
+        if isinstance(elapsed_tokens, (list, np.ndarray))
+        else np.zeros(len(tokens), dtype=float)
     )
-    
-    # Add time_tokens - use elapsed_tokens
-    data['time_tokens'] = data['elapsed_tokens']
-    
+
+    if len(tokens) == 0:
+        return np.array([], dtype=int)
+
+    baseline_age = default_age
+    birth_index = next((i for i, token in enumerate(tokens) if token == "MEDS_BIRTH"), None)
+    if birth_index is not None and birth_index < len(elapsed):
+        approx_birth_years = int(max(elapsed[birth_index], 0.0) // (24 * 365.25))
+        baseline_age = max(0, approx_birth_years)
+
+    ages = baseline_age + np.floor(np.maximum(elapsed, 0.0) / (24 * 365.25)).astype(int)
+    return ages.astype(int)
+
+
+def normalize_token_columns(data: pd.DataFrame, max_len: int = 2048) -> pd.DataFrame:
+    """Normalize token columns into the names expected by the dataset classes."""
+    data = data.copy()
+    rename_map = {
+        "type_tokens_2048": "type_tokens",
+        "age_tokens_2048": "age_tokens",
+        "time_tokens_2048": "time_tokens",
+        "position_tokens_2048": "position_tokens",
+        "elapsed_tokens_2048": "elapsed_tokens",
+        "visit_tokens_2048": "visit_tokens",
+    }
+    available_renames = {
+        source: target for source, target in rename_map.items() if source in data.columns
+    }
+    if available_renames:
+        data = data.rename(columns=available_renames)
+
+    if "elapsed_tokens" in data.columns and "time_tokens" not in data.columns:
+        data["time_tokens"] = data["elapsed_tokens"]
+
+    if "type_tokens" not in data.columns:
+        data["type_tokens"] = data["event_tokens_2048"].apply(
+            lambda tokens: np.array(
+                [infer_token_type(token) for token in list(tokens)[:max_len]],
+                dtype=int,
+            )
+        )
+
+    if "age_tokens" not in data.columns:
+        data["age_tokens"] = data.apply(
+            lambda row: estimate_age_tokens(
+                row["event_tokens_2048"],
+                row.get("elapsed_tokens", []),
+            )[:max_len],
+            axis=1,
+        )
+
     return data
 
 
@@ -91,12 +157,11 @@ def load_pretrain_data(
     
     # Load data
     data = pl.read_parquet(sequence_path).to_pandas()
-    
+
     with open(id_path, "rb") as file:
         patient_ids = pickle.load(file)
-    data=data.loc[data["subject_id"].isin(patient_ids["pretrain"])]
-    data = fix_missing_columns(data, max_len=2048)
-    print(data.columns)
+    data = data.loc[data["subject_id"].isin(patient_ids["pretrain"])]
+    data = normalize_token_columns(data, max_len=2048)
     # Filter for pretrain patients
     return data
 
