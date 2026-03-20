@@ -19,7 +19,7 @@ model_finetune:
   multi_head: False
 
 train:
-  batch_size: 2 
+  batch_size: 3 
   num_workers: 5 #5
   gpus: 1
   nodes: 1
