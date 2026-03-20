@@ -49,6 +49,58 @@ ADDITIONAL_TOKEN_TYPES = [
 ]
 
 
+def extract_pretrained_state_dict(checkpoint_path: str) -> Dict[str, torch.Tensor]:
+    """Load a checkpoint and normalize Lightning/DataParallel key prefixes."""
+    checkpoint = torch.load(checkpoint_path, map_location="cpu")
+    state_dict = checkpoint["state_dict"] if isinstance(checkpoint, dict) and "state_dict" in checkpoint else checkpoint
+
+    normalized_state_dict: Dict[str, torch.Tensor] = {}
+    for key, value in state_dict.items():
+        normalized_key = key
+        if normalized_key.startswith("module."):
+            normalized_key = normalized_key[len("module."):]
+        if normalized_key.startswith("model."):
+            normalized_key = normalized_key[len("model."):]
+        normalized_state_dict[normalized_key] = value
+
+    return normalized_state_dict
+
+
+def adapt_state_dict_to_model(
+    model: torch.nn.Module,
+    pretrained_state_dict: Dict[str, torch.Tensor],
+) -> tuple[Dict[str, torch.Tensor], list[str]]:
+    """Adapt only vocabulary-shaped matrices; leave all other tensors strict."""
+    model_state = model.state_dict()
+    adapted_state_dict: Dict[str, torch.Tensor] = {}
+    resized_keys: list[str] = []
+    allowed_resizable = {
+        "embeddings.word_embeddings.weight",
+        "model.backbone.embeddings.weight",
+        "model.lm_head.weight",
+    }
+
+    for key, value in pretrained_state_dict.items():
+        if key not in model_state:
+            continue
+
+        target_value = model_state[key]
+        if value.shape == target_value.shape:
+            adapted_state_dict[key] = value
+            continue
+
+        if key in allowed_resizable and value.ndim == 2 and value.shape[1] == target_value.shape[1]:
+            resized_tensor = target_value.clone()
+            copy_rows = min(value.shape[0], target_value.shape[0])
+            resized_tensor[:copy_rows] = value[:copy_rows]
+            adapted_state_dict[key] = resized_tensor
+            resized_keys.append(
+                f"{key}: checkpoint {tuple(value.shape)} -> model {tuple(target_value.shape)}"
+            )
+
+    return adapted_state_dict, resized_keys
+
+
 def main(  # noqa: PLR0912, PLR0915
     args: argparse.Namespace,
     pre_model_config: Dict[str, Any],
@@ -70,10 +122,40 @@ def main(  # noqa: PLR0912, PLR0915
         args.num_finetune_patients,
     )
 
+    if not args.is_multi_model:
+        if not args.label_name:
+            raise ValueError("--label-name is required for single-task finetuning.")
+        missing_frames = []
+        if args.label_name not in fine_tune.columns:
+            missing_frames.append("fine_tune")
+        if args.label_name not in fine_test.columns:
+            missing_frames.append("fine_test")
+        if missing_frames:
+            available_label_columns = sorted(
+                column
+                for column in fine_tune.columns
+                if column.startswith("label_")
+            )
+            raise KeyError(
+                f"Label column '{args.label_name}' was not found in {', '.join(missing_frames)}. "
+                f"Available label columns: {available_label_columns}"
+            )
+
+    if args.is_decoder and not args.tasks and args.label_name:
+        task_name = (
+            args.label_name[len("label_"):]
+            if args.label_name.startswith("label_")
+            else args.label_name
+        )
+        args.tasks = [task_name]
+
     # Split data based on model type
     if not args.is_multi_model:
-        fine_tune.rename(columns={args.label_name: "label"}, inplace=True)
-        fine_test.rename(columns={args.label_name: "label"}, inplace=True)
+        split_label_column = args.label_name
+        if not args.is_decoder:
+            fine_tune.rename(columns={args.label_name: "label"}, inplace=True)
+            fine_test.rename(columns={args.label_name: "label"}, inplace=True)
+            split_label_column = "label"
 
         # Split data in a stratified way based on problem type
         if args.num_labels == 2:  # Binary classification
@@ -81,13 +163,13 @@ def main(  # noqa: PLR0912, PLR0915
                 fine_tune,
                 test_size=args.val_size,
                 random_state=args.seed,
-                stratify=fine_tune["label"],
+                stratify=fine_tune[split_label_column],
             )
 
         else:  # Multi label classfication
             fine_train_ids, _, fine_val_ids, _ = iterative_train_test_split(
                 X=fine_tune["patient_id"].to_numpy().reshape(-1, 1),
-                y=np.array(fine_tune["label"].values.tolist()),
+                y=np.array(fine_tune[split_label_column].values.tolist()),
                 test_size=args.val_size,
             )
             fine_train = fine_tune[
@@ -225,13 +307,22 @@ def main(  # noqa: PLR0912, PLR0915
 
     # Create model
     if args.model_type == "cehr_bert":
+        pretrained_state_dict = extract_pretrained_state_dict(args.pretrained_path)
         pretrained_model = BertPretrain(
             args=args,
             vocab_size=tokenizer.get_vocab_size(),
             padding_idx=tokenizer.get_pad_token_id(),
             **pre_model_config,
         )
-        pretrained_model.load_state_dict(torch.load(args.pretrained_path)["state_dict"])
+        adapted_state_dict, resized_keys = adapt_state_dict_to_model(
+            pretrained_model,
+            pretrained_state_dict,
+        )
+        if resized_keys:
+            print("Resized checkpoint tensors:")
+            for key in resized_keys:
+                print(f"  - {key}")
+        pretrained_model.load_state_dict(adapted_state_dict)
         model = BertFinetune(
             args=args,
             pretrained_model=pretrained_model,
@@ -239,12 +330,21 @@ def main(  # noqa: PLR0912, PLR0915
         )
 
     elif args.model_type == "cehr_bigbird" or args.model_type == "cehr_multibird":
+        pretrained_state_dict = extract_pretrained_state_dict(args.pretrained_path)
         pretrained_model = BigBirdPretrain(
             vocab_size=tokenizer.get_vocab_size(),
             padding_idx=tokenizer.get_pad_token_id(),
             **pre_model_config,
         )
-        pretrained_model.load_state_dict(torch.load(args.pretrained_path)["state_dict"])
+        adapted_state_dict, resized_keys = adapt_state_dict_to_model(
+            pretrained_model,
+            pretrained_state_dict,
+        )
+        if resized_keys:
+            print("Resized checkpoint tensors:")
+            for key in resized_keys:
+                print(f"  - {key}")
+        pretrained_model.load_state_dict(adapted_state_dict)
         model = BigBirdFinetune(
             pretrained_model=pretrained_model,
             num_labels=args.num_labels,
@@ -255,13 +355,22 @@ def main(  # noqa: PLR0912, PLR0915
     elif args.model_type == "ehr_mamba":
         if fine_model_config.get("multi_head", False):
             fine_model_config["num_tasks"] = len(args.tasks)
+        pretrained_state_dict = extract_pretrained_state_dict(args.pretrained_path)
         pretrained_model = MambaPretrain(
             vocab_size=tokenizer.get_vocab_size(),
             padding_idx=tokenizer.get_pad_token_id(),
             cls_idx=tokenizer.get_class_token_id(),
             **pre_model_config,
         )
-        pretrained_model.load_state_dict(torch.load(args.pretrained_path)["state_dict"])
+        adapted_state_dict, resized_keys = adapt_state_dict_to_model(
+            pretrained_model,
+            pretrained_state_dict,
+        )
+        if resized_keys:
+            print("Resized checkpoint tensors:")
+            for key in resized_keys:
+                print(f"  - {key}")
+        pretrained_model.load_state_dict(adapted_state_dict)
         model = MambaFinetune(
             pretrained_model=pretrained_model,
             num_labels=args.num_labels,
@@ -269,10 +378,11 @@ def main(  # noqa: PLR0912, PLR0915
             **fine_model_config,
         )
 
-    run_id = get_run_id(args.checkpoint_dir)
+    run_id = get_run_id(args.checkpoint_dir, retrieve=True)
 
     wandb_logger = WandbLogger(
-        project=args.exp_name,
+        project=args.wandb_project,
+        name=args.exp_name,
         save_dir=args.log_dir,
         entity=args.workspace_name,
         id=run_id,
@@ -358,6 +468,12 @@ if __name__ == "__main__":
         type=str,
         default=None,
         help="Name of the Wandb workspace",
+    )
+    parser.add_argument(
+        "--wandb-project",
+        type=str,
+        default="icu_digital_twins",
+        help="Weights & Biases project name",
     )
     parser.add_argument(
         "--config-dir",

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Repair existing patient sequence parquet files in-place."""
+"""Read a patient-sequence parquet, repair nested/derived fields, and write a new parquet."""
 
 from __future__ import annotations
 
@@ -43,7 +43,7 @@ def normalize_events(events: Any) -> list[Any]:
     return [events]
 
 
-def has_death(events: list[Any] | None) -> bool:
+def has_death(events: Any) -> bool:
     """Return whether a token list contains a death indicator."""
     for token in normalize_events(events):
         token_str = str(token)
@@ -52,7 +52,7 @@ def has_death(events: list[Any] | None) -> bool:
     return False
 
 
-def has_sepsis(events: list[Any] | None) -> bool:
+def has_sepsis(events: Any) -> bool:
     """Return whether a token list contains a sepsis diagnosis code."""
     for token in normalize_events(events):
         if isinstance(token, str) and SEPSIS_PATTERN.match(token):
@@ -60,38 +60,30 @@ def has_sepsis(events: list[Any] | None) -> bool:
     return False
 
 
-def repair_patient_sequences(parquet_path: Path) -> None:
-    """Rewrite one parquet file in-place with corrected derived columns."""
-    df = pl.read_parquet(parquet_path)
-
+def repair_dataframe(df: pl.DataFrame) -> pl.DataFrame:
+    """Return a repaired copy of the patient-sequence dataframe."""
     required_columns = {"event_tokens_2048", "elapsed_tokens_2048"}
     missing = required_columns - set(df.columns)
     if missing:
         raise ValueError(f"Missing required columns: {sorted(missing)}")
 
-    # Flatten malformed token columns if needed.
     for column in TOKEN_COLUMNS:
         if column in df.columns:
             repaired_values = [
                 flatten_singleton_nested(value)
                 for value in df.get_column(column).to_list()
             ]
-            df = df.with_columns(
-                pl.Series(column, repaired_values)
-            )
+            df = df.with_columns(pl.Series(column, repaired_values))
 
-    # Ensure patient_id exists for downstream split utilities.
     if "patient_id" not in df.columns and "subject_id" in df.columns:
         df = df.with_columns(pl.col("subject_id").alias("patient_id"))
 
-    # Repair age tokens from elapsed hours.
     df = df.with_columns(
         pl.col("elapsed_tokens_2048")
         .list.eval((pl.element().clip(lower_bound=0.0) / HOURS_PER_YEAR).floor().cast(pl.Int64))
         .alias("age_tokens_2048")
     )
 
-    # Recompute death/sepsis derived labels from token sequences.
     df = df.with_columns(
         [
             pl.col("event_tokens_2048")
@@ -103,7 +95,7 @@ def repair_patient_sequences(parquet_path: Path) -> None:
         ]
     )
 
-    df = df.with_columns(
+    return df.with_columns(
         [
             pl.when(pl.col("_has_death")).then(pl.lit(0)).otherwise(pl.lit(-1)).alias("death_after_start"),
             pl.when(pl.col("_has_death")).then(pl.lit(30)).otherwise(pl.lit(-1)).alias("death_after_end"),
@@ -113,30 +105,24 @@ def repair_patient_sequences(parquet_path: Path) -> None:
         ]
     ).drop(["_has_death", "_has_sepsis"])
 
-    df.write_parquet(parquet_path)
-    print(f"Overwrote parquet with repaired columns: {parquet_path}")
-    print(f"Rows: {df.height}")
-    print(
-        "Columns added/refreshed:",
-        [
-            "patient_id",
-            "age_tokens_2048",
-            "death_after_start",
-            "death_after_end",
-            "label_mortality_2weeks",
-            "label_mortality_1month",
-            "label_sepsis",
-        ],
-    )
-
 
 def main() -> None:
     parser = argparse.ArgumentParser(
-        description="Repair an existing patient sequence parquet in-place."
+        description="Repair an existing patient sequence parquet and write a new parquet."
     )
-    parser.add_argument("parquet_path", type=Path, help="Parquet file to rewrite")
+    parser.add_argument("--input-path", type=Path, required=True, help="Input parquet file")
+    parser.add_argument("--output-path", type=Path, required=True, help="Output parquet file")
     args = parser.parse_args()
-    repair_patient_sequences(args.parquet_path)
+
+    df = pl.read_parquet(args.input_path)
+    repaired = repair_dataframe(df)
+
+    args.output_path.parent.mkdir(parents=True, exist_ok=True)
+    repaired.write_parquet(args.output_path)
+
+    print(f"Read: {args.input_path}")
+    print(f"Wrote repaired parquet: {args.output_path}")
+    print(f"Rows: {repaired.height}")
 
 
 if __name__ == "__main__":

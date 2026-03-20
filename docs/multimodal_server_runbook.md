@@ -69,20 +69,6 @@ Typical file:
 
 - `data/stay_level/stay_sequences_2048.parquet`
 
-## Recommended Strategy For Today
-
-If you need results quickly:
-
-1. use your **existing pretrained backbone**
-2. run **old-pipeline finetuning** for the first baseline
-3. if you still have time, run **stay-level EHR + image** as the first fusion experiment
-
-Reason:
-
-- old finetuning is the shortest path to a working baseline
-- the old pipeline already matches your current parquet and split setup
-- image fusion today should be treated as a separate experiment, not jammed directly into the old finetune script
-
 ## Assumed Server Paths
 
 Replace these with your real server paths if needed.
@@ -159,31 +145,7 @@ Output:
 
 That checkpoint is the **backbone** used later by the stay-level fusion models.
 
-## Part B: Fastest Baseline For Today
-
-### B1. What You Need To Modify For Old-Pipeline Finetuning
-
-For a quick baseline, you do **not** need to redesign the old finetune script.
-
-What matters:
-
-- use the labeled patient parquet
-- use the current split pickle
-- point at your pretrained checkpoint
-- pick one target first, usually mortality
-
-For the simplest single-task run:
-
-- keep `model_finetune.multi_head: False` in [`ehr_mamba.yaml`](/home/ap794/wspersonal/icu_digital_twins_mamba/odyssey/models/configs/ehr_mamba.yaml)
-- do **not** try to joint-train mortality and sepsis for the first run
-- run one task at a time
-
-So for the first presentation result:
-
-- mortality first
-- optionally sepsis second if the label is present and you have time
-
-### B2. Old-Pipeline Mortality Finetuning
+### B1. Old-Pipeline Mortality Finetuning
 
 This is the shortest path to a first result.
 
@@ -253,34 +215,6 @@ python $REPO/training/finetune.py \
   --test_output_dir test_outputs
 ```
 
-### B4. Do You Need To Modify The Old Finetuning Code?
-
-For the first single-task baseline:
-
-- **probably not**
-
-The most important thing is using the correct inputs:
-
-- labeled sequence parquet
-- valid split pickle
-- pretrained checkpoint
-
-For a fast presentation, I would **not** spend time changing the old finetune architecture unless it crashes.
-
-## Part C: Fastest Image Fusion Experiment For Today
-
-The old patient-level finetune script is **not** the right place to bolt images on today.
-
-For today, the cleanest image experiment is:
-
-1. keep the old patient-level finetune result as the baseline
-2. run a separate **stay-level EHR + image** experiment using the pretrained backbone
-
-That lets you present:
-
-- strong pretrained EHR baseline
-- initial multimodal fusion result with images
-
 ### C1. Build Stay-Level Artifacts
 
 ```bash
@@ -313,6 +247,38 @@ python $REPO/data_pipelines/build_stay_image_index.py \
   --output-path $STAY_IMAGE_INDEX \
   --keep-all-images
 ```
+
+If the CXR CSV and JPG tree live on a different cluster, do not transfer the raw
+JPG hierarchy. Instead preprocess them there into portable tensor packs first:
+
+```bash
+python $REPO/data_pipelines/precompute_cxr_tensor_pack.py \
+  --cxr-csv-path /hpc/group/kamaleswaranlab/mimic_cxr/cxr_icu_multiple_studies_deduplicated_reports_preprocessed_with_jpg_paths.csv \
+  --image-root /hpc/group/kamaleswaranlab/mimic_cxr/mimic_cxr_jpg \
+  --output-dir /hpc/group/kamaleswaranlab/mimic_cxr/precomputed_cxr_tensor_pack_224 \
+  --image-size 224 \
+  --shard-size 1024
+```
+
+That writes:
+
+- `cxr_tensor_manifest.parquet`
+- `tensor_packs/cxr_tensor_pack_*.pt`
+
+Copy that compact directory to the training server, then materialize only the
+stay-matched studies into the local cache format:
+
+```bash
+python $REPO/data_pipelines/materialize_stay_image_tensors_from_pack.py \
+  --stay-image-index-path $STAY_IMAGE_INDEX \
+  --manifest-path /path/to/precomputed_cxr_tensor_pack_224/cxr_tensor_manifest.parquet \
+  --pack-root /path/to/precomputed_cxr_tensor_pack_224 \
+  --output-dir $STAY_IMAGE_CACHE_DIR \
+  --output-index-path $STAY_IMAGE_INDEX_CACHED
+```
+
+Use this route when the images live on another server and you want to transfer a
+portable preprocessed cache instead of millions of raw JPG files.
 
 Cache the matched images:
 

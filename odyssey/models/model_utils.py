@@ -118,6 +118,32 @@ def normalize_token_columns(data: pd.DataFrame, max_len: int = 2048) -> pd.DataF
     if available_renames:
         data = data.rename(columns=available_renames)
 
+    sequence_columns = [
+        "event_tokens_2048",
+        "type_tokens",
+        "age_tokens",
+        "time_tokens",
+        "position_tokens",
+        "elapsed_tokens",
+        "visit_tokens",
+    ]
+
+    def _flatten_singleton_nested_list(value: Any) -> Any:
+        if isinstance(value, np.ndarray):
+            value = value.tolist()
+        if (
+            isinstance(value, list)
+            and len(value) == 1
+            and isinstance(value[0], (list, np.ndarray))
+        ):
+            inner = value[0]
+            return inner.tolist() if isinstance(inner, np.ndarray) else inner
+        return value
+
+    for column in sequence_columns:
+        if column in data.columns:
+            data[column] = data[column].apply(_flatten_singleton_nested_list)
+
     if "elapsed_tokens" in data.columns and "time_tokens" not in data.columns:
         data["time_tokens"] = data["elapsed_tokens"]
 
@@ -138,6 +164,15 @@ def normalize_token_columns(data: pd.DataFrame, max_len: int = 2048) -> pd.DataF
             axis=1,
         )
 
+    if (
+        "label_mortality_1month" not in data.columns
+        and {"death_after_start", "death_after_end"}.issubset(data.columns)
+    ):
+        data["label_mortality_1month"] = (
+            (pd.to_numeric(data["death_after_start"], errors="coerce") >= 0)
+            & (pd.to_numeric(data["death_after_end"], errors="coerce") <= 32)
+        ).astype(int)
+
     return data
 
 
@@ -154,6 +189,8 @@ def get_required_sequence_columns(max_len: int = 2048) -> list[str]:
         f"visit_tokens_{max_len}",
         "patient_id",
         "label",
+        "death_after_start",
+        "death_after_end",
     ]
 
 
@@ -244,11 +281,24 @@ def load_finetune_data(
     with open(id_path, "rb") as file:
         patient_ids = pickle.load(file)
 
-    fine_tune = data.loc[
-        data["patient_id"].isin(
-            patient_ids["finetune"][valid_scheme][num_finetune_patients],
+    finetune_pool = patient_ids["finetune"][valid_scheme]
+    if num_finetune_patients in finetune_pool:
+        selected_finetune_ids = finetune_pool[num_finetune_patients]
+    elif str(num_finetune_patients).isdigit():
+        subset_size = int(num_finetune_patients)
+        if "all" not in finetune_pool:
+            raise KeyError(
+                f"Finetune split '{valid_scheme}' does not contain key '{num_finetune_patients}' "
+                "or fallback key 'all'."
+            )
+        selected_finetune_ids = finetune_pool["all"][:subset_size]
+    else:
+        raise KeyError(
+            f"Finetune split '{valid_scheme}' does not contain key '{num_finetune_patients}'. "
+            f"Available keys: {sorted(finetune_pool.keys())}"
         )
-    ]
+
+    fine_tune = data.loc[data["patient_id"].isin(selected_finetune_ids)]
     fine_test = data.loc[data["patient_id"].isin(patient_ids["test"])]
     return fine_tune, fine_test
 

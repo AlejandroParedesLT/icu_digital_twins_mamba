@@ -325,15 +325,17 @@ class MambaFinetune(pl.LightningModule):
             visit_orders=visit_orders,
             visit_segments=visit_segments,
         )
-
-        return self.model(
+        model_kwargs = dict(
             input_ids=concept_ids,
             inputs_embeds=inputs_embeds,
             labels=labels,
-            task_indices=task_indices,
             output_hidden_states=output_hidden_states,
             return_dict=return_dict,
         )
+        if self.multi_head:
+            model_kwargs["task_indices"] = task_indices
+
+        return self.model(**model_kwargs)
 
     def training_step(self, batch: Dict[str, Any], batch_idx: int) -> Any:
         """Train model on training dataset."""
@@ -346,7 +348,7 @@ class MambaFinetune(pl.LightningModule):
             batch["visit_segments"],
         )
         labels = batch["labels"]
-        task_indices = batch["task_indices"]
+        task_indices = batch.get("task_indices")
 
         # Ensure use of mixed precision
         with autocast():
@@ -378,7 +380,7 @@ class MambaFinetune(pl.LightningModule):
             batch["visit_segments"],
         )
         labels = batch["labels"]
-        task_indices = batch["task_indices"]
+        task_indices = batch.get("task_indices")
 
         # Ensure use of mixed precision
         with autocast():
@@ -410,7 +412,7 @@ class MambaFinetune(pl.LightningModule):
             batch["visit_segments"],
         )
         labels = batch["labels"]
-        task_indices = batch["task_indices"]
+        task_indices = batch.get("task_indices")
 
         # Ensure use of mixed precision
         with autocast():

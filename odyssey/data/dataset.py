@@ -189,7 +189,9 @@ class AugmentedTokenizationMixin:
         """
         tokens = {}
         
-        # Map column names to expected model input keys
+        # Map column names to expected model input keys. For the current patient-
+        # level parquet, `position_tokens` are raw token positions, not visit ids,
+        # so we do not feed them into the visit-order embedding table.
         column_to_key_mapping = {
             'type_tokens': 'type_ids',
             'age_tokens': 'ages',
@@ -205,8 +207,13 @@ class AugmentedTokenizationMixin:
                     # Get the standardized key name
                     key_name = column_to_key_mapping.get(token_type, token_type)
                     
-                    # Get the token values
-                    token_values = data[token_type]
+                    # Get the token values. `visit_orders` should reflect visit
+                    # indices, not absolute token positions; prefer visit_tokens
+                    # when available.
+                    if token_type == "position_tokens" and "visit_tokens" in data:
+                        token_values = data["visit_tokens"]
+                    else:
+                        token_values = data[token_type]
                     
                     # Handle different data types
                     if isinstance(token_values, (list, np.ndarray)):
@@ -214,8 +221,12 @@ class AugmentedTokenizationMixin:
                     else:
                         token_values = [token_values]
                     
-                    # Convert to tensor
-                    if 'time' in token_type or 'elapsed' in token_type:
+                    # Convert to tensor. Visit-segment embeddings only have a
+                    # tiny table, so clip into a safe range.
+                    if key_name == "visit_segments":
+                        token_values = np.clip(np.asarray(token_values), 0, 2)
+                        tokens[key_name] = torch.tensor(token_values, dtype=torch.long)
+                    elif 'time' in token_type or 'elapsed' in token_type:
                         tokens[key_name] = torch.tensor(token_values, dtype=torch.float32)
                     else:
                         tokens[key_name] = torch.tensor(token_values, dtype=torch.long)

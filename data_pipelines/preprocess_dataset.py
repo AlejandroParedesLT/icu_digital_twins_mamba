@@ -49,6 +49,9 @@ TYPE_MAP = {
     "other": 8,
 }
 
+DEATH_TOKEN = "MEDS_DEATH"
+SEPSIS_DIAGNOSIS_REGEX = r"^DIAGNOSIS(?:038|A40|A41)"
+
 
 def load_meds_data(meds_prep_dir: str) -> pl.LazyFrame:
     """
@@ -245,7 +248,6 @@ def extract_sequences_from_meds(df: pl.LazyFrame, max_len: int = 2048) -> pl.Dat
         ).alias("_num_visit_markers"),
         type_expr.cast(pl.Int64).slice(0, max_len).alias(f"type_tokens_{max_len}"),
         age_expr.cast(pl.Int64).slice(0, max_len).alias(f"age_tokens_{max_len}"),
-        pl.int_ranges(pl.lit(0), pl.len()).slice(0, max_len).alias(f"position_tokens_{max_len}"),
         (
             (time_expr - time_expr.first()).dt.total_seconds() / 3600.0
         ).cast(pl.Float64).slice(0, max_len).alias(f"elapsed_tokens_{max_len}"),
@@ -265,10 +267,16 @@ def extract_sequences_from_meds(df: pl.LazyFrame, max_len: int = 2048) -> pl.Dat
         sorted_df.group_by("subject_id", maintain_order=True)
         .agg(agg_exprs)
         .with_columns(
-            pl.when(pl.col("_num_visit_markers") > 0)
-            .then(pl.col("_num_visit_markers"))
-            .otherwise(pl.lit(1))
-            .alias("num_visits")
+            [
+                pl.int_ranges(
+                    pl.lit(0, dtype=pl.Int64),
+                    pl.col(f"event_tokens_{max_len}").list.len(),
+                ).alias(f"position_tokens_{max_len}"),
+                pl.when(pl.col("_num_visit_markers") > 0)
+                .then(pl.col("_num_visit_markers"))
+                .otherwise(pl.lit(1))
+                .alias("num_visits"),
+            ]
         )
         .drop(["_num_visit_markers", "event_count"], strict=False)
     )
@@ -328,18 +336,25 @@ def add_task_labels(df: pl.DataFrame, max_len: int = 2048) -> pl.DataFrame:
         Dataframe with added labels
     """
     print("Adding task labels...")
-
-    def has_death(events: List[str]) -> bool:
-        return any(
-            ("DEATH" in str(token)) or ("deceased" in str(token).lower())
-            for token in (events or [])
-        )
-
     return (
         df.with_columns(
-            pl.col(f"event_tokens_{max_len}")
-            .map_elements(has_death, return_dtype=pl.Boolean)
-            .alias("_has_death")
+            [
+                pl.col(f"event_tokens_{max_len}")
+                .list.eval(
+                    pl.element().cast(pl.Utf8).str.contains(rf"^{DEATH_TOKEN}$|DEATH|deceased")
+                )
+                .list.any()
+                .alias("_has_death"),
+                pl.col(f"event_tokens_{max_len}")
+                .list.eval(
+                    pl.element()
+                    .cast(pl.Utf8)
+                    .str.to_uppercase()
+                    .str.contains(SEPSIS_DIAGNOSIS_REGEX)
+                )
+                .list.any()
+                .alias("_has_sepsis"),
+            ]
         )
         .with_columns(
             [
@@ -354,12 +369,20 @@ def add_task_labels(df: pl.DataFrame, max_len: int = 2048) -> pl.DataFrame:
                 pl.when(pl.col("_has_death"))
                 .then(pl.lit(1))
                 .otherwise(pl.lit(0))
+                .alias("label_mortality_2weeks"),
+                pl.when(pl.col("_has_death"))
+                .then(pl.lit(1))
+                .otherwise(pl.lit(0))
                 .alias("label_mortality_1month"),
+                pl.when(pl.col("_has_sepsis"))
+                .then(pl.lit(1))
+                .otherwise(pl.lit(0))
+                .alias("label_sepsis"),
                 pl.lit([], dtype=pl.List(pl.Int64)).alias("common_conditions"),
                 pl.lit([], dtype=pl.List(pl.Int64)).alias("rare_conditions"),
             ]
         )
-        .drop("_has_death")
+        .drop(["_has_death", "_has_sepsis"])
     )
 
 
@@ -474,6 +497,20 @@ def main():
     if os.path.exists(labeled_sequence_file):
         print(f"Loading labeled sequences from {labeled_sequence_file}")
         sequences_df = pl.read_parquet(labeled_sequence_file)
+        required_label_columns = {
+            "label_mortality_1month",
+            "label_sepsis",
+            "death_after_start",
+            "death_after_end",
+        }
+        if not required_label_columns.issubset(set(sequences_df.columns)):
+            print("Refreshing missing label columns in cached labeled parquet...")
+            sequences_df = add_task_labels(
+                ensure_patient_id_column(sequences_df),
+                max_len=args.max_len,
+            )
+            sequences_df.write_parquet(labeled_sequence_file)
+            print(f"Rewrote labeled sequences to {labeled_sequence_file}")
     else:
         if os.path.exists(sequence_file):
             print(f"Loading existing sequences from {sequence_file}")
